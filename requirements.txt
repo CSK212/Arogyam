@@ -1,0 +1,11 @@
+streamlit
+pandas
+matplotlib
+numpy
+Pillow
+cryptography
+fpdf
+streamlit-option-menu
+scikit-learn
+tensorflow-cpu
+supabase
