@@ -42,7 +42,7 @@ supabase: Client = init_supabase()
 GLOBAL_POSTS = [
     "Alpha Post", "Bravo Post", "Charlie Post", "Delta Post", "Echo Post", 
     "Foxtrot Post", "Golf Post", "Hotel Post", "India Post", "Juliet Post", 
-    "Kilo Post", "Lima Post", "Mike Post", "November Post", "Oscar Post"
+    "Kilo Post", "Lima Post", "Mike Post", "November Post", "Oscar Post", "Papa Post", "Quebec Post", "Romeo Post", "Siera post", "Tango Base", "uniform post", "Victor post", "Whiskey Post", "X-ray base", "Yankee", "Zulu base"
 ]
 
 # ==========================================
