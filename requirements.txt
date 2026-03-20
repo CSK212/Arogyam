@@ -5,6 +5,7 @@ numpy
 Pillow
 cryptography
 fpdf
+streamlit-autorefresh
 streamlit-option-menu
 scikit-learn
 tensorflow-cpu
