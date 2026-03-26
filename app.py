@@ -1,5 +1,6 @@
 import os
 import io
+import tempfile  # <--- Add this missing line right here!
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +11,9 @@ from PIL import Image
 import streamlit as st
 from cryptography.fernet import Fernet
 import time
+
+# --- SUPABASE IMPORT ---
+from supabase import create_client, Client
 
 # --- SUPABASE IMPORT ---
 from supabase import create_client, Client
@@ -42,7 +46,7 @@ supabase: Client = init_supabase()
 GLOBAL_POSTS = [
     "Alpha Post", "Bravo Post", "Charlie Post", "Delta Post", "Echo Post", 
     "Foxtrot Post", "Golf Post", "Hotel Post", "India Post", "Juliet Post", 
-    "Kilo Post", "Lima Post", "Mike Post", "November Post", "Oscar Post", "Papa Post", "Quebec Post", "Romeo Post", "Siera post", "Tango Base", "uniform post", "Victor post", "Whiskey Post", "X-ray base", "Yankee", "Zulu base"
+    "Kilo Post", "Lima Post", "Mike Post", "November Post", "Oscar Post"
 ]
 
 # ==========================================
@@ -62,7 +66,7 @@ def decrypt_data(data):
     except Exception: return data
 
 # ==========================================
-# CLOUD DATA FETCHING FUNCTIONS
+# CLOUD DATA FETCHING & HELPERS
 # ==========================================
 def get_patient_record(army_no_query):
     if not army_no_query: return None
@@ -81,6 +85,14 @@ def get_patient_record(army_no_query):
         row['nok_phone'] = decrypt_data(row['nok_phone'])
         return row
     return None
+
+def parse_date_safe(date_str, default_year=2000):
+    if not date_str or date_str == "N/A":
+        return datetime.now().date()
+    try:
+        return datetime.strptime(str(date_str), '%Y-%m-%d').date()
+    except:
+        return datetime(default_year, 1, 1).date()
 
 def render_whatsapp_alert(module_name, rank, name, army_no):
     res = supabase.table("med_contacts").select("*").execute()
@@ -777,6 +789,18 @@ def main_app():
         st.markdown("<div class='brand-sub'>BY BARHE CHALO 🩺</div>", unsafe_allow_html=True)
         st.markdown("---")
         st.success(f"👤 **BFNA ID:** {st.session_state['bfna_id']}\n\n📍 **POST:** {st.session_state['post_name']}")
+        
+        # --- GLOBAL LIVE AUTO-REFRESH FEATURE ---
+        st.markdown("---")
+        live_sync = st.toggle("🔄 Global Auto-Refresh (30s)", value=False)
+        if live_sync:
+            try:
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=30000, limit=None, key="global_refresh")
+                st.caption(f"Last Synced: {datetime.now().strftime('%H:%M:%S')}")
+            except ImportError:
+                st.error("⚠️ The 'streamlit-autorefresh' package is missing. Please run `pip install streamlit-autorefresh`.")
+        st.markdown("---")
         
         icons_list = ["heart-pulse", "lightning-charge", "triangle-half", "lungs", "thermometer-snow", "clipboard2-pulse", "journal-medical", "person-badge"]
         if st.session_state['bfna_id'] in ['RMO', 'MASTER_ADMIN']:
@@ -1892,22 +1916,27 @@ def main_app():
                         
                         st.markdown("---")
                         st.write("### Manage Records")
-                        col_del1, col_del2 = st.columns(2)
-                        with col_del1:
-                            del_id = st.text_input("Enter Row ID to Delete:", key="del_w_id")
-                            if st.button("Delete Record"):
-                                if del_id.isdigit():
-                                    supabase.table("weekly_vitals").delete().eq("id", del_id).execute()
-                                    st.success(f"Record {del_id} deleted.")
+                        
+                        # RBAC: Only Admin/RMO can delete
+                        if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                            col_del1, col_del2 = st.columns(2)
+                            with col_del1:
+                                del_id = st.text_input("Enter Row ID to Delete:", key="del_w_id")
+                                if st.button("Delete Record"):
+                                    if del_id.isdigit():
+                                        supabase.table("weekly_vitals").delete().eq("id", del_id).execute()
+                                        st.success(f"Record {del_id} deleted.")
+                                        time.sleep(1)
+                                        st.rerun()
+                            with col_del2:
+                                st.warning("Clear entirely.")
+                                if st.button("CLEAR ALL VITALS"):
+                                    supabase.table("weekly_vitals").delete().eq("post_name", st.session_state['post_name']).execute()
+                                    st.success("All records cleared.")
                                     time.sleep(1)
                                     st.rerun()
-                        with col_del2:
-                            st.warning("Clear entirely.")
-                            if st.button("CLEAR ALL VITALS"):
-                                supabase.table("weekly_vitals").delete().eq("post_name", st.session_state['post_name']).execute()
-                                st.success("All records cleared.")
-                                time.sleep(1)
-                                st.rerun()
+                        else:
+                            st.info("⚠️ BFNAs have View-Only access to the Weekly Vitals Ledger. Only RMO can delete records.")
                     else: st.info("No vitals recorded at this post yet.")
             except Exception as e:
                 st.error(f"DB Error: {e}")
@@ -2021,31 +2050,31 @@ def main_app():
                 st.warning("No medical records found.")
 
         with tab_manage:
-            st.subheader("Manage Database Records")
-            if not df.empty:
-                st.dataframe(df[['id', 'timestamp', 'name', 'army_no', 'module', 'post_name']])
-            
-            del_col1, del_col2 = st.columns(2)
-            with del_col1:
-                st.write("Delete a Specific Record")
-                del_id = st.text_input("Enter Row ID to Delete:", key="del_ph")
-                if st.button("Delete Record", type="secondary"):
-                    if del_id.isdigit():
-                        supabase.table("patient_history").delete().eq("id", del_id).execute()
-                        st.success(f"Record {del_id} deleted.")
+            if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                st.subheader("Manage Database Records")
+                if not df.empty:
+                    st.dataframe(df[['id', 'timestamp', 'name', 'army_no', 'module', 'post_name']])
+                
+                del_col1, del_col2 = st.columns(2)
+                with del_col1:
+                    st.write("Delete a Specific Record")
+                    del_id = st.text_input("Enter Row ID to Delete:", key="del_ph")
+                    if st.button("Delete Record", type="secondary"):
+                        if del_id.isdigit():
+                            supabase.table("patient_history").delete().eq("id", del_id).execute()
+                            st.success(f"Record {del_id} deleted.")
+                            time.sleep(1)
+                            st.rerun()
+                with del_col2:
+                    st.write("Clear All Records")
+                    st.warning("⚠️ This will permanently delete records.")
+                    if st.button("CLEAR ALL RECORDS", type="primary"):
+                        supabase.table("patient_history").delete().neq("id", 0).execute() # Deletes all
+                        st.success("Records cleared.")
                         time.sleep(1)
                         st.rerun()
-            with del_col2:
-                st.write("Clear All Records")
-                st.warning("⚠️ This will permanently delete records.")
-                if st.button("CLEAR ALL RECORDS", type="primary"):
-                    if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
-                        supabase.table("patient_history").delete().neq("id", 0).execute() # Deletes all
-                    else:
-                        supabase.table("patient_history").delete().eq("post_name", st.session_state['post_name']).execute()
-                    st.success("Records cleared.")
-                    time.sleep(1)
-                    st.rerun()
+            else:
+                st.info("⚠️ BFNAs have View-Only access to Manage Records. Please contact the RMO to delete historical entries.")
 
         with tab_manual:
             st.subheader("Add Record Manually")
@@ -2080,98 +2109,229 @@ def main_app():
     # 9. PATIENT REGISTRATION
     # ------------------------------------------
     elif selected == "Patient Registration":
-        st.markdown("### 📝 PATIENT REGISTRATION FORM")
-        st.markdown("Register a new patient into the Battalion database. Calculated fields (Age, HAA Days, BMI) update automatically.")
+        st.markdown("### 📝 BATTALION PATIENT REGISTRY")
         st.markdown("<hr style='margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
         
-        col1, col2 = st.columns(2)
-        reg_army_no = col1.text_input("Army / Service No. *")
-        reg_rank = col2.text_input("Rank *")
-        reg_name = col1.text_input("Name *")
-        reg_coy = col2.text_input("Company / Unit *")
+        tab_reg, tab_manage_reg = st.tabs(["📝 Register New Patient", "🗄️ Battalion Registry Base"])
         
-        st.markdown("---")
-        reg_dob = col1.date_input("Date of Birth", min_value=datetime(1950, 1, 1), value=datetime(1995, 1, 1))
-        age = (datetime.now().date() - reg_dob).days // 365
-        col2.info(f"**Calculated Age:** {age} years")
-        
-        reg_bg = col1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"])
-        
-        st.markdown("---")
-        reg_ind_date = col1.date_input("Date of Induction to HAA")
-        haa_days = (datetime.now().date() - reg_ind_date).days
-        if haa_days < 0: haa_days = 0
-        col2.info(f"**Total Days in HAA:** {haa_days} days")
-        
-        reg_acc1 = col1.date_input("Stage 1 Acclimatization Date")
-        reg_acc2 = col2.date_input("Stage 2 Acclimatization Date")
-        
-        post_acc2_days = (datetime.now().date() - reg_acc2).days
-        if post_acc2_days < 0: post_acc2_days = 0
-        col2.success(f"**Days Post Stage-2 Acclimatization:** {post_acc2_days} days")
-        
-        st.markdown("---")
-        reg_leaves = col1.number_input("Leaves Availed This Year (Days)", 0, 365, 0)
-        reg_shape = col2.selectbox("SHAPE Category", ["SHAPE 1", "Low Medical Category (LMC)"])
-        
-        reg_weight = col1.number_input("Weight (kg)", 30.0, 150.0, 70.0)
-        reg_height = col2.number_input("Height (cm)", 100.0, 250.0, 170.0)
-        
-        bmi = reg_weight / ((reg_height/100) ** 2) if reg_height > 0 else 0
-        col2.info(f"**Calculated BMI:** {bmi:.1f}")
-        
-        st.markdown("---")
-        reg_surg_yn = st.radio("Any past surgery or hospital admission?", ["No", "Yes"], horizontal=True)
-        if reg_surg_yn == "Yes":
-            reg_surg_desc = st.text_input("Provide details of surgery/admission:")
-        else:
-            reg_surg_desc = "None"
+        with tab_reg:
+            st.markdown("Register a new patient into the Battalion database. Calculated fields (Age, HAA Days, BMI) update automatically.")
+            col1, col2 = st.columns(2)
+            reg_army_no = col1.text_input("Army / Service No. *")
+            reg_rank = col2.text_input("Rank *")
+            reg_name = col1.text_input("Name *")
+            reg_coy = col2.text_input("Company / Unit *")
             
-        col_pme1, col_pme2 = st.columns(2)
-        reg_pme_yn = col_pme1.radio("AME/PME Done?", ["No", "Yes"], horizontal=True)
-        if reg_pme_yn == "Yes":
-            reg_pme_date = col_pme2.date_input("Date of AME/PME")
-        else:
-            reg_pme_date = "N/A"
+            st.markdown("---")
+            reg_dob = col1.date_input("Date of Birth", min_value=datetime(1950, 1, 1), value=datetime(1995, 1, 1))
+            age = (datetime.now().date() - reg_dob).days // 365
+            col2.info(f"**Calculated Age:** {age} years")
             
-        st.markdown("---")
-        st.subheader("Next of Kin (NOK) Details")
-        nok_name = st.text_input("NOK Name")
-        nok_phone = st.text_input("NOK Phone Number")
-        nok_dist = st.text_input("NOK District")
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 REGISTER PATIENT", type="primary"):
-            if not reg_army_no.strip() or not reg_name.strip() or not reg_rank.strip() or not reg_coy.strip():
-                st.error("⚠️ Please fill all mandatory fields (Army No, Rank, Name, Company).")
+            reg_bg = col1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"])
+            
+            st.markdown("---")
+            reg_ind_date = col1.date_input("Date of Induction to HAA")
+            haa_days = (datetime.now().date() - reg_ind_date).days
+            if haa_days < 0: haa_days = 0
+            col2.info(f"**Total Days in HAA:** {haa_days} days")
+            
+            reg_acc1 = col1.date_input("Stage 1 Acclimatization Date")
+            reg_acc2 = col2.date_input("Stage 2 Acclimatization Date")
+            
+            post_acc2_days = (datetime.now().date() - reg_acc2).days
+            if post_acc2_days < 0: post_acc2_days = 0
+            col2.success(f"**Days Post Stage-2 Acclimatization:** {post_acc2_days} days")
+            
+            st.markdown("---")
+            reg_leaves = col1.number_input("Leaves Availed This Year (Days)", 0, 365, 0)
+            reg_shape = col2.selectbox("SHAPE Category", ["SHAPE 1", "Low Medical Category (LMC)"])
+            
+            reg_weight = col1.number_input("Weight (kg)", 30.0, 150.0, 70.0)
+            reg_height = col2.number_input("Height (cm)", 100.0, 250.0, 170.0)
+            
+            bmi = reg_weight / ((reg_height/100) ** 2) if reg_height > 0 else 0
+            col2.info(f"**Calculated BMI:** {bmi:.1f}")
+            
+            st.markdown("---")
+            reg_surg_yn = st.radio("Any past surgery or hospital admission?", ["No", "Yes"], horizontal=True)
+            if reg_surg_yn == "Yes":
+                reg_surg_desc = st.text_input("Provide details of surgery/admission:")
             else:
-                enc_army = encrypt_data(reg_army_no)
+                reg_surg_desc = "None"
                 
-                # Cloud Duplicate Check
-                res = supabase.table("patient_registry").select("*").eq("army_no", enc_army).execute()
-                if res.data:
-                    st.error(f"⚠️ Registration Failed: Patient with Army No '{reg_army_no}' is already registered.")
+            col_pme1, col_pme2 = st.columns(2)
+            reg_pme_yn = col_pme1.radio("AME/PME Done?", ["No", "Yes"], horizontal=True)
+            if reg_pme_yn == "Yes":
+                reg_pme_date = col_pme2.date_input("Date of AME/PME")
+            else:
+                reg_pme_date = "N/A"
+                
+            st.markdown("---")
+            st.subheader("Next of Kin (NOK) Details")
+            nok_name = st.text_input("NOK Name")
+            nok_phone = st.text_input("NOK Phone Number")
+            nok_dist = st.text_input("NOK District")
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 REGISTER PATIENT", type="primary"):
+                if not reg_army_no.strip() or not reg_name.strip() or not reg_rank.strip() or not reg_coy.strip():
+                    st.error("⚠️ Please fill all mandatory fields (Army No, Rank, Name, Company).")
                 else:
-                    enc_name = encrypt_data(reg_name)
-                    enc_nok_name = encrypt_data(nok_name)
-                    enc_nok_phone = encrypt_data(nok_phone)
+                    enc_army = encrypt_data(reg_army_no)
                     
-                    reg_data = {
-                        "army_no": enc_army, "rank": reg_rank, "name": enc_name, "company": reg_coy,
-                        "dob": str(reg_dob), "blood_group": reg_bg, "induction_date": str(reg_ind_date),
-                        "acclimatization_1": str(reg_acc1), "acclimatization_2": str(reg_acc2), "leaves_this_year": reg_leaves,
-                        "shape_category": reg_shape, "weight": reg_weight, "height": reg_height, "surgery_history": reg_surg_desc,
-                        "ame_pme_done": reg_pme_yn, "ame_pme_date": str(reg_pme_date), "nok_name": enc_nok_name, "nok_phone": enc_nok_phone,
-                        "nok_district": nok_dist, "post_name": st.session_state['post_name']
-                    }
+                    # Cloud Duplicate Check
+                    res = supabase.table("patient_registry").select("*").eq("army_no", enc_army).execute()
+                    if res.data:
+                        st.error(f"⚠️ Registration Failed: Patient with Army No '{reg_army_no}' is already registered.")
+                    else:
+                        enc_name = encrypt_data(reg_name)
+                        enc_nok_name = encrypt_data(nok_name)
+                        enc_nok_phone = encrypt_data(nok_phone)
+                        
+                        reg_data = {
+                            "army_no": enc_army, "rank": reg_rank, "name": enc_name, "company": reg_coy,
+                            "dob": str(reg_dob), "blood_group": reg_bg, "induction_date": str(reg_ind_date),
+                            "acclimatization_1": str(reg_acc1), "acclimatization_2": str(reg_acc2), "leaves_this_year": reg_leaves,
+                            "shape_category": reg_shape, "weight": reg_weight, "height": reg_height, "surgery_history": reg_surg_desc,
+                            "ame_pme_done": reg_pme_yn, "ame_pme_date": str(reg_pme_date), "nok_name": enc_nok_name, "nok_phone": enc_nok_phone,
+                            "nok_district": nok_dist, "post_name": st.session_state['post_name']
+                        }
+                        
+                        try:
+                            supabase.table("patient_registry").upsert(reg_data).execute()
+                            st.success(f"✅ Patient {reg_army_no} successfully registered in Battalion Database.")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to register patient. Ensure internet connection. Error: {e}")
+
+        with tab_manage_reg:
+            st.subheader("Battalion Patient Database")
+            
+            res_manage = supabase.table("patient_registry").select("*").execute()
+            df_manage = pd.DataFrame(res_manage.data)
+            
+            if not df_manage.empty:
+                df_manage['army_no'] = df_manage['army_no'].apply(decrypt_data)
+                df_manage['name'] = df_manage['name'].apply(decrypt_data)
+                df_manage['nok_name'] = df_manage['nok_name'].apply(decrypt_data)
+                df_manage['nok_phone'] = df_manage['nok_phone'].apply(decrypt_data)
+                
+                search_reg = st.text_input("🔍 Search Registry by Army No or Name:")
+                if search_reg:
+                    df_manage = df_manage[df_manage['army_no'].str.contains(search_reg, case=False, na=False) | df_manage['name'].str.contains(search_reg, case=False, na=False)]
+                
+                st.dataframe(df_manage, use_container_width=True, hide_index=True)
+                
+                # RBAC for Modifying or Deleting Patient Registry
+                if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                    st.markdown("---")
+                    st.subheader("Edit or Delete Patient Profile")
                     
-                    try:
-                        supabase.table("patient_registry").upsert(reg_data).execute()
-                        st.success(f"✅ Patient {reg_army_no} successfully registered in Battalion Database.")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to register patient. Ensure internet connection. Error: {e}")
+                    patient_list = [f"{row['army_no']} - {row['rank']} {row['name']}" for _, row in df_manage.iterrows()]
+                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list)
+                    
+                    if selected_pt != "-- Select --":
+                        sel_army_no = selected_pt.split(" - ")[0]
+                        pt_data = df_manage[df_manage['army_no'] == sel_army_no].iloc[0]
+                        
+                        with st.form("edit_pt_form"):
+                            st.info("Modify any patient field below and click Update to save changes.")
+                            
+                            e_c1, e_c2, e_c3 = st.columns(3)
+                            e_rank = e_c1.text_input("Rank", value=pt_data.get('rank', ''))
+                            e_name = e_c2.text_input("Name", value=pt_data.get('name', ''))
+                            e_coy = e_c3.text_input("Company/Unit", value=pt_data.get('company', ''))
+                            
+                            bg_opts = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"]
+                            curr_bg = pt_data.get('blood_group', 'Unknown')
+                            e_bg = e_c1.selectbox("Blood Group", bg_opts, index=bg_opts.index(curr_bg) if curr_bg in bg_opts else 8)
+                            e_dob = e_c2.date_input("Date of Birth", value=parse_date_safe(pt_data.get('dob')))
+                            
+                            curr_post = pt_data.get('post_name', GLOBAL_POSTS[0])
+                            e_post = e_c3.selectbox("Assigned Post", GLOBAL_POSTS, index=GLOBAL_POSTS.index(curr_post) if curr_post in GLOBAL_POSTS else 0)
+                            
+                            st.markdown("---")
+                            i_c1, i_c2, i_c3 = st.columns(3)
+                            e_ind_date = i_c1.date_input("Induction Date", value=parse_date_safe(pt_data.get('induction_date')))
+                            e_acc1 = i_c2.date_input("Stage 1 Acclimatization", value=parse_date_safe(pt_data.get('acclimatization_1')))
+                            e_acc2 = i_c3.date_input("Stage 2 Acclimatization", value=parse_date_safe(pt_data.get('acclimatization_2')))
+                            
+                            m_c1, m_c2, m_c3 = st.columns(3)
+                            shape_opts = ["SHAPE 1", "Low Medical Category (LMC)"]
+                            curr_shape = pt_data.get('shape_category', 'SHAPE 1')
+                            e_shape = m_c1.selectbox("SHAPE Category", shape_opts, index=shape_opts.index(curr_shape) if curr_shape in shape_opts else 0)
+                            e_leaves = m_c2.number_input("Leaves Availed", 0, 365, int(pt_data.get('leaves_this_year', 0)))
+                            e_surg = m_c3.text_input("Surgery History", value=pt_data.get('surgery_history', 'None'))
+                            
+                            v_c1, v_c2, v_c3 = st.columns(3)
+                            e_weight = v_c1.number_input("Weight (kg)", 30.0, 150.0, float(pt_data.get('weight', 70.0)))
+                            e_height = v_c2.number_input("Height (cm)", 100.0, 250.0, float(pt_data.get('height', 170.0)))
+                            
+                            pme_opts = ["No", "Yes"]
+                            curr_pme = pt_data.get('ame_pme_done', 'No')
+                            e_pme = v_c3.radio("PME Done?", pme_opts, index=pme_opts.index(curr_pme) if curr_pme in pme_opts else 0, horizontal=True)
+                            
+                            e_pme_date = st.date_input("AME/PME Date", value=parse_date_safe(pt_data.get('ame_pme_date'))) if e_pme == "Yes" else "N/A"
+                            
+                            st.markdown("---")
+                            st.markdown("**Next of Kin (NOK)**")
+                            n_c1, n_c2, n_c3 = st.columns(3)
+                            e_nok_name = n_c1.text_input("NOK Name", value=pt_data.get('nok_name', ''))
+                            e_nok_phone = n_c2.text_input("NOK Phone", value=pt_data.get('nok_phone', ''))
+                            e_nok_dist = n_c3.text_input("NOK District", value=pt_data.get('nok_district', ''))
+                            
+                            if st.form_submit_button("🔄 UPDATE ENTIRE PROFILE", type="primary"):
+                                try:
+                                    up_name = encrypt_data(e_name)
+                                    up_army = encrypt_data(sel_army_no)
+                                    up_nok_name = encrypt_data(e_nok_name)
+                                    up_nok_phone = encrypt_data(e_nok_phone)
+                                    
+                                    update_payload = {
+                                        "rank": e_rank, 
+                                        "name": up_name, 
+                                        "company": e_coy,
+                                        "dob": str(e_dob),
+                                        "blood_group": e_bg,
+                                        "induction_date": str(e_ind_date),
+                                        "acclimatization_1": str(e_acc1),
+                                        "acclimatization_2": str(e_acc2),
+                                        "leaves_this_year": e_leaves,
+                                        "shape_category": e_shape,
+                                        "weight": e_weight,
+                                        "height": e_height,
+                                        "surgery_history": e_surg,
+                                        "ame_pme_done": e_pme,
+                                        "ame_pme_date": str(e_pme_date) if e_pme == "Yes" else "N/A",
+                                        "nok_name": up_nok_name,
+                                        "nok_phone": up_nok_phone,
+                                        "nok_district": e_nok_dist,
+                                        "post_name": e_post
+                                    }
+                                    
+                                    supabase.table("patient_registry").update(update_payload).eq("army_no", up_army).execute()
+                                    
+                                    st.success(f"Successfully updated complete record for {sel_army_no}.")
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Update failed: {e}")
+                                    
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary"):
+                            try:
+                                del_army = encrypt_data(sel_army_no)
+                                supabase.table("patient_registry").delete().eq("army_no", del_army).execute()
+                                st.success(f"Patient {sel_army_no} has been permanently deleted.")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Deletion failed: {e}")
+                else:
+                    st.info("⚠️ BFNAs have View-Only access to the Patient Registry. Please contact the RMO to modify or delete patient dossiers.")
+            else:
+                st.warning("Registry is empty.")
 
     # ------------------------------------------
     # 10. RMO DASHBOARD (ADMIN ONLY)
@@ -2180,92 +2340,199 @@ def main_app():
         if st.session_state['bfna_id'] not in ["MASTER_ADMIN", "RMO"]:
             st.error("⚠️ You do not have permission to access the RMO Dashboard.")
         else:
-            st.markdown("### 📊 POST-WISE MEDICAL READINESS DASHBOARD")
-            st.markdown("Real-time combat readiness and health surveillance overview.")
+            tab_dash, tab_manage_pts = st.tabs(["📊 Readiness Dashboard", "🗄️ Modify/Delete Patients"])
             
-            col_ref, col_time = st.columns([1, 2])
-            with col_ref:
-                live_sync = st.toggle("🔄 Live Auto-Refresh (30s)", value=False)
-            with col_time:
-                st.caption(f"Last Synced: {datetime.now().strftime('%H:%M:%S')}")
-            
-            if live_sync:
-                try:
-                    from streamlit_autorefresh import st_autorefresh
-                    st_autorefresh(interval=30000, limit=None, key="rmo_refresh")
-                except ImportError:
-                    st.error("⚠️ The 'streamlit-autorefresh' package is missing. Please run `pip install streamlit-autorefresh` in your terminal.")
-            st.markdown("---")
-
-            view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS)
-            
-            res_reg = supabase.table("patient_registry").select("*").execute()
-            res_hist = supabase.table("patient_history").select("*").execute()
-            
-            reg_df = pd.DataFrame(res_reg.data)
-            hist_df = pd.DataFrame(res_hist.data)
-            
-            if not reg_df.empty:
-                reg_df['army_no'] = reg_df['army_no'].apply(decrypt_data)
-                reg_df['name'] = reg_df['name'].apply(decrypt_data)
-                
-                if view_post != "All Posts":
-                    reg_df = reg_df[reg_df['post_name'] == view_post]
-                
-                total_troops = len(reg_df)
-                
-                def calc_acclim(row):
-                    try:
-                        ind_date = datetime.strptime(row['induction_date'], '%Y-%m-%d').date()
-                        days = (datetime.now().date() - ind_date).days
-                        return days >= 14
-                    except: return False
-                
-                fully_acclim = reg_df.apply(calc_acclim, axis=1).sum() if total_troops > 0 else 0
-                pending_pme = len(reg_df[reg_df['ame_pme_done'] == 'No'])
-                
-                under_obs = 0
-                if not hist_df.empty:
-                    hist_df['army_no'] = hist_df['army_no'].apply(decrypt_data)
-                    latest_hist = hist_df.sort_values('timestamp').groupby('army_no').tail(1)
-                    if view_post != "All Posts":
-                        latest_hist = latest_hist[latest_hist['post_name'] == view_post]
-                    under_obs = len(latest_hist[latest_hist['status_tier'].str.contains('AMBER|RED|YELLOW', case=False, na=False)])
-                
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Registered Troops", total_troops)
-                c2.metric("Fully Acclimatized (>14 Days)", fully_acclim)
-                c3.metric("Pending PME/AME", pending_pme)
-                c4.metric("Under Med Observation", under_obs)
-                
+            with tab_dash:
+                st.markdown("### 📊 POST-WISE MEDICAL READINESS DASHBOARD")
+                st.markdown("Real-time combat readiness and health surveillance overview.")
                 st.markdown("---")
-                st.subheader("📋 Troop Health Roster")
-                
-                if not hist_df.empty:
-                    hist_summary = hist_df.sort_values('timestamp').groupby('army_no').tail(1)[['army_no', 'status_tier', 'timestamp']]
-                    hist_summary.rename(columns={'status_tier': 'Latest Triage', 'timestamp': 'Last Exam'}, inplace=True)
-                    disp_df = pd.merge(reg_df, hist_summary, on='army_no', how='left')
-                else:
-                    disp_df = reg_df.copy()
-                    disp_df['Latest Triage'] = "No Data"
-                    disp_df['Last Exam'] = "No Data"
-                
-                disp_df['Acclimatized'] = disp_df.apply(calc_acclim, axis=1).map({True: 'Yes', False: 'No'})
-                disp_df['Latest Triage'] = disp_df['Latest Triage'].fillna("Healthy / Unchecked")
-                
-                clean_df = disp_df[['army_no', 'rank', 'name', 'post_name', 'Acclimatized', 'ame_pme_done', 'Latest Triage']]
-                clean_df.columns = ['Army No', 'Rank', 'Name', 'Post', 'Acclimatized (>14d)', 'PME Done', 'Latest Med Status']
-                
-                def highlight_critical(row):
-                    if 'RED' in str(row['Latest Med Status']):
-                        return ['background-color: rgba(255, 0, 0, 0.2)'] * len(row)
-                    elif 'AMBER' in str(row['Latest Med Status']):
-                        return ['background-color: rgba(255, 165, 0, 0.2)'] * len(row)
-                    return [''] * len(row)
 
-                st.dataframe(clean_df.style.apply(highlight_critical, axis=1), use_container_width=True, hide_index=True)
-            else:
-                st.info("No troops registered in the Patient Registry yet.")
+                view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS)
+                
+                res_reg = supabase.table("patient_registry").select("*").execute()
+                res_hist = supabase.table("patient_history").select("*").execute()
+                
+                reg_df = pd.DataFrame(res_reg.data)
+                hist_df = pd.DataFrame(res_hist.data)
+                
+                if not reg_df.empty:
+                    reg_df['army_no'] = reg_df['army_no'].apply(decrypt_data)
+                    reg_df['name'] = reg_df['name'].apply(decrypt_data)
+                    
+                    if view_post != "All Posts":
+                        reg_df = reg_df[reg_df['post_name'] == view_post]
+                    
+                    total_troops = len(reg_df)
+                    
+                    def calc_acclim(row):
+                        try:
+                            ind_date = datetime.strptime(row['induction_date'], '%Y-%m-%d').date()
+                            days = (datetime.now().date() - ind_date).days
+                            return days >= 14
+                        except: return False
+                    
+                    fully_acclim = reg_df.apply(calc_acclim, axis=1).sum() if total_troops > 0 else 0
+                    pending_pme = len(reg_df[reg_df['ame_pme_done'] == 'No'])
+                    
+                    under_obs = 0
+                    if not hist_df.empty:
+                        hist_df['army_no'] = hist_df['army_no'].apply(decrypt_data)
+                        latest_hist = hist_df.sort_values('timestamp').groupby('army_no').tail(1)
+                        if view_post != "All Posts":
+                            latest_hist = latest_hist[latest_hist['post_name'] == view_post]
+                        under_obs = len(latest_hist[latest_hist['status_tier'].str.contains('AMBER|RED|YELLOW', case=False, na=False)])
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Total Registered Troops", total_troops)
+                    c2.metric("Fully Acclimatized (>14 Days)", fully_acclim)
+                    c3.metric("Pending PME/AME", pending_pme)
+                    c4.metric("Under Med Observation", under_obs)
+                    
+                    st.markdown("---")
+                    st.subheader("📋 Troop Health Roster")
+                    
+                    if not hist_df.empty:
+                        hist_summary = hist_df.sort_values('timestamp').groupby('army_no').tail(1)[['army_no', 'status_tier', 'timestamp']]
+                        hist_summary.rename(columns={'status_tier': 'Latest Triage', 'timestamp': 'Last Exam'}, inplace=True)
+                        disp_df = pd.merge(reg_df, hist_summary, on='army_no', how='left')
+                    else:
+                        disp_df = reg_df.copy()
+                        disp_df['Latest Triage'] = "No Data"
+                        disp_df['Last Exam'] = "No Data"
+                    
+                    disp_df['Acclimatized'] = disp_df.apply(calc_acclim, axis=1).map({True: 'Yes', False: 'No'})
+                    disp_df['Latest Triage'] = disp_df['Latest Triage'].fillna("Healthy / Unchecked")
+                    
+                    clean_df = disp_df[['army_no', 'rank', 'name', 'post_name', 'Acclimatized', 'ame_pme_done', 'Latest Triage']]
+                    clean_df.columns = ['Army No', 'Rank', 'Name', 'Post', 'Acclimatized (>14d)', 'PME Done', 'Latest Med Status']
+                    
+                    def highlight_critical(row):
+                        if 'RED' in str(row['Latest Med Status']):
+                            return ['background-color: rgba(255, 0, 0, 0.2)'] * len(row)
+                        elif 'AMBER' in str(row['Latest Med Status']):
+                            return ['background-color: rgba(255, 165, 0, 0.2)'] * len(row)
+                        return [''] * len(row)
+
+                    st.dataframe(clean_df.style.apply(highlight_critical, axis=1), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No troops registered in the Patient Registry yet.")
+            
+            with tab_manage_pts:
+                st.subheader("Master Patient Registry Control")
+                st.info("This mirrors the Battalion Registry Base. Changes here apply globally.")
+                
+                # Fetch fresh registry for editing
+                res_rmo_reg = supabase.table("patient_registry").select("*").execute()
+                df_rmo_reg = pd.DataFrame(res_rmo_reg.data)
+                
+                if not df_rmo_reg.empty:
+                    df_rmo_reg['army_no'] = df_rmo_reg['army_no'].apply(decrypt_data)
+                    df_rmo_reg['name'] = df_rmo_reg['name'].apply(decrypt_data)
+                    df_rmo_reg['nok_name'] = df_rmo_reg['nok_name'].apply(decrypt_data)
+                    df_rmo_reg['nok_phone'] = df_rmo_reg['nok_phone'].apply(decrypt_data)
+                    
+                    patient_list = [f"{row['army_no']} - {row['rank']} {row['name']}" for _, row in df_rmo_reg.iterrows()]
+                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list, key="rmo_pt_sel")
+                    
+                    if selected_pt != "-- Select --":
+                        sel_army_no = selected_pt.split(" - ")[0]
+                        pt_data = df_rmo_reg[df_rmo_reg['army_no'] == sel_army_no].iloc[0]
+                        
+                        with st.form("rmo_edit_pt_form"):
+                            st.info("Modify any patient field below and click Update to save changes.")
+                            
+                            e_c1, e_c2, e_c3 = st.columns(3)
+                            e_rank = e_c1.text_input("Rank", value=pt_data.get('rank', ''))
+                            e_name = e_c2.text_input("Name", value=pt_data.get('name', ''))
+                            e_coy = e_c3.text_input("Company/Unit", value=pt_data.get('company', ''))
+                            
+                            bg_opts = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"]
+                            curr_bg = pt_data.get('blood_group', 'Unknown')
+                            e_bg = e_c1.selectbox("Blood Group", bg_opts, index=bg_opts.index(curr_bg) if curr_bg in bg_opts else 8)
+                            e_dob = e_c2.date_input("Date of Birth", value=parse_date_safe(pt_data.get('dob')))
+                            
+                            curr_post = pt_data.get('post_name', GLOBAL_POSTS[0])
+                            e_post = e_c3.selectbox("Assigned Post", GLOBAL_POSTS, index=GLOBAL_POSTS.index(curr_post) if curr_post in GLOBAL_POSTS else 0)
+                            
+                            st.markdown("---")
+                            i_c1, i_c2, i_c3 = st.columns(3)
+                            e_ind_date = i_c1.date_input("Induction Date", value=parse_date_safe(pt_data.get('induction_date')))
+                            e_acc1 = i_c2.date_input("Stage 1 Acclimatization", value=parse_date_safe(pt_data.get('acclimatization_1')))
+                            e_acc2 = i_c3.date_input("Stage 2 Acclimatization", value=parse_date_safe(pt_data.get('acclimatization_2')))
+                            
+                            m_c1, m_c2, m_c3 = st.columns(3)
+                            shape_opts = ["SHAPE 1", "Low Medical Category (LMC)"]
+                            curr_shape = pt_data.get('shape_category', 'SHAPE 1')
+                            e_shape = m_c1.selectbox("SHAPE Category", shape_opts, index=shape_opts.index(curr_shape) if curr_shape in shape_opts else 0)
+                            e_leaves = m_c2.number_input("Leaves Availed", 0, 365, int(pt_data.get('leaves_this_year', 0)))
+                            e_surg = m_c3.text_input("Surgery History", value=pt_data.get('surgery_history', 'None'))
+                            
+                            v_c1, v_c2, v_c3 = st.columns(3)
+                            e_weight = v_c1.number_input("Weight (kg)", 30.0, 150.0, float(pt_data.get('weight', 70.0)))
+                            e_height = v_c2.number_input("Height (cm)", 100.0, 250.0, float(pt_data.get('height', 170.0)))
+                            
+                            pme_opts = ["No", "Yes"]
+                            curr_pme = pt_data.get('ame_pme_done', 'No')
+                            e_pme = v_c3.radio("PME Done?", pme_opts, index=pme_opts.index(curr_pme) if curr_pme in pme_opts else 0, horizontal=True)
+                            
+                            e_pme_date = st.date_input("AME/PME Date", value=parse_date_safe(pt_data.get('ame_pme_date'))) if e_pme == "Yes" else "N/A"
+                            
+                            st.markdown("---")
+                            st.markdown("**Next of Kin (NOK)**")
+                            n_c1, n_c2, n_c3 = st.columns(3)
+                            e_nok_name = n_c1.text_input("NOK Name", value=pt_data.get('nok_name', ''))
+                            e_nok_phone = n_c2.text_input("NOK Phone", value=pt_data.get('nok_phone', ''))
+                            e_nok_dist = n_c3.text_input("NOK District", value=pt_data.get('nok_district', ''))
+                            
+                            if st.form_submit_button("🔄 UPDATE ENTIRE PROFILE", type="primary"):
+                                try:
+                                    up_name = encrypt_data(e_name)
+                                    up_army = encrypt_data(sel_army_no)
+                                    up_nok_name = encrypt_data(e_nok_name)
+                                    up_nok_phone = encrypt_data(e_nok_phone)
+                                    
+                                    update_payload = {
+                                        "rank": e_rank, 
+                                        "name": up_name, 
+                                        "company": e_coy,
+                                        "dob": str(e_dob),
+                                        "blood_group": e_bg,
+                                        "induction_date": str(e_ind_date),
+                                        "acclimatization_1": str(e_acc1),
+                                        "acclimatization_2": str(e_acc2),
+                                        "leaves_this_year": e_leaves,
+                                        "shape_category": e_shape,
+                                        "weight": e_weight,
+                                        "height": e_height,
+                                        "surgery_history": e_surg,
+                                        "ame_pme_done": e_pme,
+                                        "ame_pme_date": str(e_pme_date) if e_pme == "Yes" else "N/A",
+                                        "nok_name": up_nok_name,
+                                        "nok_phone": up_nok_phone,
+                                        "nok_district": e_nok_dist,
+                                        "post_name": e_post
+                                    }
+                                    
+                                    supabase.table("patient_registry").update(update_payload).eq("army_no", up_army).execute()
+                                    
+                                    st.success(f"Successfully updated complete record for {sel_army_no}.")
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Update failed: {e}")
+                                    
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary", key="rmo_del_pt"):
+                            try:
+                                del_army = encrypt_data(sel_army_no)
+                                supabase.table("patient_registry").delete().eq("army_no", del_army).execute()
+                                st.success(f"Patient {sel_army_no} has been permanently deleted.")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Deletion failed: {e}")
+                else:
+                    st.warning("Registry is currently empty.")
 
     # ------------------------------------------
     # 11. ADMIN SETTINGS (RMO ONLY)
