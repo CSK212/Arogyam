@@ -2128,22 +2128,22 @@ def main_app():
             reg_coy = col2.text_input("Company / Unit *")
             
             st.markdown("---")
-            reg_dob = col1.date_input("Date of Birth", min_value=datetime(1950, 1, 1), value=datetime(1995, 1, 1))
-            age = (datetime.now().date() - reg_dob).days // 365
+            reg_dob = col1.date_input("Date of Birth", min_value=datetime(1950, 1, 1).date(), max_value=datetime.now().date(), value=datetime(1995, 1, 1).date())
+            age = (datetime.now().date() - reg_dob).days // 365 if reg_dob else 0
             col2.info(f"**Calculated Age:** {age} years")
             
             reg_bg = col1.selectbox("Blood Group", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"])
             
             st.markdown("---")
-            reg_ind_date = col1.date_input("Date of Induction to HAA")
-            haa_days = (datetime.now().date() - reg_ind_date).days
+            reg_ind_date = col1.date_input("Date of Induction to HAA", max_value=datetime.now().date())
+            haa_days = (datetime.now().date() - reg_ind_date).days if reg_ind_date else 0
             if haa_days < 0: haa_days = 0
             col2.info(f"**Total Days in HAA:** {haa_days} days")
             
             reg_acc1 = col1.date_input("Stage 1 Acclimatization Date")
             reg_acc2 = col2.date_input("Stage 2 Acclimatization Date")
             
-            post_acc2_days = (datetime.now().date() - reg_acc2).days
+            post_acc2_days = (datetime.now().date() - reg_acc2).days if reg_acc2 else 0
             if post_acc2_days < 0: post_acc2_days = 0
             col2.success(f"**Days Post Stage-2 Acclimatization:** {post_acc2_days} days")
             
