@@ -1954,38 +1954,51 @@ def main_app():
                         
                         csv = visual_df.to_csv(index=False).encode('utf-8')
                         st.download_button("📥 EXPORT CSV FOR MO", data=csv, file_name=f'WeeklyVitals_{st.session_state["post_name"]}.csv', mime='text/csv', type="primary")
+
+                # --- ENHANCED DROPDOWN DELETE LOGIC ---
+                if not v_df.empty:
+                    st.markdown("---")
+                    st.write("### Manage Records")
+                    
+                    # RBAC: Only Admin/RMO can delete
+                    if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
                         
-                        st.markdown("---")
-                        st.write("### Manage Records")
+                        # 1. Format the records into a clean dropdown list
+                        vitals_list = [f"ID: {row['id']} | Date: {row['timestamp']} | Army No: {row['army_no']} | BP: {row['sys_bp']}/{row['dia_bp']}" for _, row in v_df.iterrows()]
+                        selected_vital = st.selectbox("Select Vitals Record to Delete", ["-- Select --"] + vitals_list, key="sel_del_vital")
                         
-                        # RBAC: Only Admin/RMO can delete
-                        if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
-                            st.markdown("---")
-                            st.subheader("Edit or Delete Vitals Record")
-                            
-                            vitals_list = [f"ID: {row['id']} | {row['timestamp']} | {row['army_no']} | BP: {row['sys_bp']}/{row['dia_bp']}" for _, row in v_df.iterrows()]
-                            selected_vital = st.selectbox("Select Record to Delete", ["-- Select --"] + vitals_list, key="sel_del_vital")
-                            
-                            col_del1, col_del2 = st.columns(2)
-                            with col_del1:
-                                if st.button("🗑️ Delete Selected Record", type="secondary"):
-                                    if selected_vital != "-- Select --":
+                        col_del1, col_del2 = st.columns(2)
+                        with col_del1:
+                            if st.button("🗑️ Delete Selected Record", type="secondary"):
+                                if selected_vital != "-- Select --":
+                                    try:
+                                        # 2. Isolate the exact ID number from the dropdown string
                                         target_id = int(selected_vital.split("ID: ")[1].split(" |")[0])
+                                        
+                                        # 3. Fire the deletion command to Supabase
                                         supabase.table("weekly_vitals").delete().eq("id", target_id).execute()
-                                        st.success("Record successfully deleted.")
+                                        st.success("✅ Record successfully deleted.")
                                         time.sleep(1)
                                         st.rerun()
-                                    else:
-                                        st.warning("Please select a record first.")
-                            with col_del2:
-                                if st.button("🚨 CLEAR ALL VITALS", type="primary"):
-                                    supabase.table("weekly_vitals").delete().eq("post_name", st.session_state['post_name']).execute()
+                                    except Exception as e:
+                                        st.error(f"Deletion failed: {e}")
+                                else:
+                                    st.warning("⚠️ Please select a record from the dropdown first.")
+                        
+                        with col_del2:
+                            st.warning("Clear entirely.")
+                            if st.button("🚨 CLEAR ALL VITALS", type="primary"):
+                                try:
+                                    # Safely wipe the whole table
+                                    supabase.table("weekly_vitals").delete().neq("id", 0).execute() 
                                     st.success("All records cleared.")
                                     time.sleep(1)
                                     st.rerun()
-                        else:
-                            st.info("⚠️ BFNAs have View-Only access to the Weekly Vitals Ledger. Only RMO can delete records.")
-                    else: st.info("No vitals recorded at this post yet.")
+                                except Exception as e:
+                                    st.error(f"Clear failed: {e}")
+                    else:
+                        st.info("⚠️ BFNAs have View-Only access to the Weekly Vitals Ledger. Only the RMO can delete records.")
+
             except Exception as e:
                 st.error(f"DB Error: {e}")
                 
@@ -2126,7 +2139,7 @@ def main_app():
                         
                         try:
                             supabase.table("acclimatization_details").insert(insert_data).execute()
-                            st.success("Record Saved to Supabase!")
+                            st.success("✅ Record successfully saved to Supabase Cloud!")
                             
                             # Generate PDF
                             if fpdf_available:
@@ -2174,11 +2187,18 @@ def main_app():
                                 pdf.set_font('Arial', 'B', 11)
                                 pdf.cell(0, 8, f"FINAL STATUS: {status_opt.upper()}", 0, 1)
                                 
-                                pdf_bytes = pdf.output(dest='S').encode('latin-1')
-                                st.download_button("📄 DOWNLOAD ACCLIMATIZATION PDF", pdf_bytes, f"Acclim_{p['army_no']}.pdf", "application/pdf")
-                            
+                                # Store PDF in memory safely
+                                st.session_state['acc_pdf_data'] = pdf.output(dest='S').encode('latin-1')
+                                st.session_state['acc_pdf_army'] = p['army_no']
+                                st.session_state['acc_saved'] = True
+                                
                         except Exception as e:
                             st.error(f"Save failed: {e}")
+
+                # Safely generate the download button OUTSIDE the form
+                if st.session_state.get('acc_saved', False):
+                    st.download_button("📄 DOWNLOAD ACCLIMATIZATION PDF", st.session_state['acc_pdf_data'], f"Acclim_{st.session_state['acc_pdf_army']}.pdf", "application/pdf", type="secondary")
+                            
 
         with tab_records:
             st.subheader(f"Acclimatization Records for {st.session_state['post_name']}")
@@ -2258,7 +2278,7 @@ def main_app():
                         audio_records = filtered_df[(filtered_df['audio_path'] != 'None') & (filtered_df['audio_path'].notnull())]
                         if not audio_records.empty:
                             st.markdown("### 🎧 Play Voice Notes")
-                            selected_audio = st.selectbox("Select Patient Record:", audio_records['army_no'] + " - " + audio_records['timestamp'])
+                            selected_audio = st.selectbox("Select Patient Record:", audio_records['army_no'] + " - " + audio_records['timestamp'], key="audio_player_rmo")
                             if selected_audio:
                                 path_to_play = audio_records[audio_records['army_no'] + " - " + audio_records['timestamp'] == selected_audio]['audio_path'].values[0]
                                 if path_to_play and path_to_play != 'None':
@@ -2286,7 +2306,7 @@ def main_app():
                     audio_records = filtered_df[(filtered_df['audio_path'] != 'None') & (filtered_df['audio_path'].notnull())]
                     if not audio_records.empty:
                         st.markdown("### 🎧 Play Voice Notes")
-                        selected_audio = st.selectbox("Select Patient Record:", audio_records['army_no'] + " - " + audio_records['timestamp'])
+                        selected_audio = st.selectbox("Select Patient Record:", audio_records['army_no'] + " - " + audio_records['timestamp'], key="audio_player_bfna")
                         if selected_audio:
                             path_to_play = audio_records[audio_records['army_no'] + " - " + audio_records['timestamp'] == selected_audio]['audio_path'].values[0]
                             if path_to_play and path_to_play != 'None':
@@ -2305,7 +2325,6 @@ def main_app():
                     st.markdown("---")
                     st.subheader("Delete Specific Triage Record")
                     
-                    # Generate dropdown list using the exact Supabase ID
                     hist_list = [f"ID: {row['id']} | {row['timestamp']} | {row['army_no']} | {row['module']}" for _, row in df.iterrows()]
                     selected_hist = st.selectbox("Select Record to Delete", ["-- Select --"] + hist_list, key="sel_del_hist")
                     
@@ -2313,7 +2332,6 @@ def main_app():
                     with del_col1:
                         if st.button("🗑️ Delete Selected Record", type="secondary"):
                             if selected_hist != "-- Select --":
-                                # Extract just the number from the string
                                 target_id = int(selected_hist.split("ID: ")[1].split(" |")[0])
                                 supabase.table("patient_history").delete().eq("id", target_id).execute()
                                 st.success("Record successfully deleted.")
@@ -2325,10 +2343,7 @@ def main_app():
                     with del_col2:
                         st.warning("⚠️ This will permanently delete records.")
                         if st.button("🚨 CLEAR ALL RECORDS", type="primary"):
-                            if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
-                                supabase.table("patient_history").delete().neq("id", 0).execute()
-                            else:
-                                supabase.table("patient_history").delete().eq("post_name", st.session_state['post_name']).execute()
+                            supabase.table("patient_history").delete().neq("id", 0).execute()
                             st.success("Records cleared.")
                             time.sleep(1)
                             st.rerun()
@@ -2605,7 +2620,6 @@ def main_app():
     # ------------------------------------------
 
     elif selected == "RMO Dashboard":
-
         if st.session_state['bfna_id'] not in ["MASTER_ADMIN", "RMO"]:
             st.error("⚠️ You do not have permission to access the RMO Dashboard.")
         else:
@@ -2630,15 +2644,8 @@ def main_app():
                 st.markdown("---")
                 # ----------------------------------
 
-            view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS, key="rmo_dash_post_sel")
-
-            
-            with tab_dash:
-                st.markdown("### 📊 POST-WISE MEDICAL READINESS DASHBOARD")
-                st.markdown("Real-time combat readiness and health surveillance overview.")
-                st.markdown("---")
-
-                view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS)
+                # UNIQUE KEY ADDED HERE TO PREVENT CRASH
+                view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS, key="rmo_dash_post_sel_unique")
                 
                 res_reg = supabase.table("patient_registry").select("*").execute()
                 res_hist = supabase.table("patient_history").select("*").execute()
@@ -2655,18 +2662,19 @@ def main_app():
                     
                     total_troops = len(reg_df)
                     
-                    # Rank Classification Logic
+                    # --- Rank Classification Logic ---
                     def categorize_rank(r):
                         r_str = str(r).lower()
-                        if any(x in r_str for x in ['sub', 'nb']): return 'JCOs'
+                        if any(x in r_str for x in ['sub', 'nb', 'naib']): return 'JCOs'
                         elif any(x in r_str for x in ['lt', 'capt', 'maj', 'col', 'brig', 'gen']): return 'Officers'
                         else: return 'NCOs / ORs'
                     
                     reg_df['rank_category'] = reg_df['rank'].apply(categorize_rank)
-                    off_count = len(reg_df[reg_df['rank_category'] == 'Officers'])
-                    jco_count = len(reg_df[reg_df['rank_category'] == 'JCOs'])
-                    or_count = len(reg_df[reg_df['rank_category'] == 'NCOs / ORs'])
+                    off_df = reg_df[reg_df['rank_category'] == 'Officers']
+                    jco_df = reg_df[reg_df['rank_category'] == 'JCOs']
+                    or_df = reg_df[reg_df['rank_category'] == 'NCOs / ORs']
                     
+                    # --- Medical Classification Logic ---
                     def calc_acclim(row):
                         try:
                             ind_date = datetime.strptime(row['induction_date'], '%Y-%m-%d').date()
@@ -2674,120 +2682,68 @@ def main_app():
                             return days >= 14
                         except: return False
                     
-                    fully_acclim = reg_df.apply(calc_acclim, axis=1).sum() if total_troops > 0 else 0
-                    pending_pme = len(reg_df[reg_df['ame_pme_done'] == 'No'])
+                    acclim_mask = reg_df.apply(calc_acclim, axis=1)
+                    fully_acclim_df = reg_df[acclim_mask]
+                    pending_pme_df = reg_df[reg_df['ame_pme_done'] == 'No']
                     
                     under_obs = 0
+                    obs_df = pd.DataFrame()
                     if not hist_df.empty:
                         hist_df['army_no'] = hist_df['army_no'].apply(decrypt_data)
+                        hist_df['name'] = hist_df['name'].apply(decrypt_data) # <--- ADDED THIS LINE
                         latest_hist = hist_df.sort_values('timestamp').groupby('army_no').tail(1)
                         if view_post != "All Posts":
                             latest_hist = latest_hist[latest_hist['post_name'] == view_post]
-                        under_obs = len(latest_hist[latest_hist['status_tier'].str.contains('AMBER|RED|YELLOW', case=False, na=False)])
+                        obs_df = latest_hist[latest_hist['status_tier'].str.contains('AMBER|RED|YELLOW', case=False, na=False)]
+                        under_obs = len(obs_df)
                     
+                    # --- RENDER METRICS & LISTS ---
                     st.markdown("##### 👥 Troop Deployment & Rank Breakdown")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Total Registered Troops", total_troops)
-                    c2.metric("Officers", off_count)
-                    c3.metric("JCOs", jco_count)
-                    c4.metric("NCOs / ORs", or_count)
+                    c2.metric("Officers", len(off_df))
+                    c3.metric("JCOs", len(jco_df))
+                    c4.metric("NCOs / ORs", len(or_df))
                     
+                    with st.expander("🔍 CLICK TO VIEW PERSONNEL LISTS (BY RANK)"):
+                        t1, t2, t3, t4 = st.tabs(["All Troops", "Officers", "JCOs", "NCOs / ORs"])
+                        with t1: st.dataframe(reg_df[['army_no', 'rank', 'name', 'company', 'post_name']], use_container_width=True, hide_index=True)
+                        with t2: st.dataframe(off_df[['army_no', 'rank', 'name', 'company', 'post_name']], use_container_width=True, hide_index=True)
+                        with t3: st.dataframe(jco_df[['army_no', 'rank', 'name', 'company', 'post_name']], use_container_width=True, hide_index=True)
+                        with t4: st.dataframe(or_df[['army_no', 'rank', 'name', 'company', 'post_name']], use_container_width=True, hide_index=True)
+                    
+                    st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown("##### ⚕️ Medical Readiness & Surveillance")
                     m1, m2, m3 = st.columns(3)
-                    m1.metric("Fully Acclimatized (>14 Days)", fully_acclim)
-                    m2.metric("Pending PME/AME", pending_pme)
+                    m1.metric("Fully Acclimatized (>14 Days)", len(fully_acclim_df))
+                    m2.metric("Pending PME/AME", len(pending_pme_df))
                     m3.metric("Under Med Observation (Amber/Red)", under_obs)
                     
-                    # ----------------------------------------------------
-                    # VISUAL ANALYTICS SECTION
-                    # ----------------------------------------------------
+                    with st.expander("🔍 CLICK TO VIEW MEDICAL READINESS LISTS"):
+                        mt1, mt2, mt3 = st.tabs(["Fully Acclimatized", "Pending PME/AME", "Under Med Observation"])
+                        with mt1: st.dataframe(fully_acclim_df[['army_no', 'rank', 'name', 'induction_date', 'post_name']], use_container_width=True, hide_index=True)
+                        with mt2: st.dataframe(pending_pme_df[['army_no', 'rank', 'name', 'company', 'post_name']], use_container_width=True, hide_index=True)
+                        with mt3: 
+                            if not obs_df.empty:
+                                # Simply print the dataframe directly without merging
+                                st.dataframe(obs_df[['army_no', 'rank', 'name', 'module', 'status_tier', 'timestamp']], use_container_width=True, hide_index=True)
+                            else:
+                                st.success("✅ No troops currently under medical observation.")
+                    
+                    st.markdown("---")
+                    st.subheader("📋 Master Troop Health Roster")
+                    
                     if not hist_df.empty:
                         hist_summary = hist_df.sort_values('timestamp').groupby('army_no').tail(1)[['army_no', 'status_tier', 'timestamp']]
                         hist_summary.rename(columns={'status_tier': 'Latest Triage', 'timestamp': 'Last Exam'}, inplace=True)
                         disp_df = pd.merge(reg_df, hist_summary, on='army_no', how='left')
                     else:
                         disp_df = reg_df.copy()
-                        disp_df['Latest Triage'] = "Healthy / Unchecked"
+                        disp_df['Latest Triage'] = "No Data"
                         disp_df['Last Exam'] = "No Data"
                     
                     disp_df['Acclimatized'] = disp_df.apply(calc_acclim, axis=1).map({True: 'Yes', False: 'No'})
                     disp_df['Latest Triage'] = disp_df['Latest Triage'].fillna("Healthy / Unchecked")
-                    
-                    st.markdown("---")
-                    st.subheader("📈 Battalion Health Analytics")
-                    chart_col1, chart_col2 = st.columns(2)
-                    
-                    with chart_col1:
-                        st.markdown("**Current Triage Status Distribution**")
-                        status_counts = disp_df['Latest Triage'].value_counts()
-                        
-                        fig1, ax1 = plt.subplots(figsize=(6, 4))
-                        # Color coding mapping
-                        colors = ['#10B981' if 'Healthy' in x or 'GREEN' in x else '#FBBF24' if 'YELLOW' in x else '#F59E0B' if 'AMBER' in x else '#EF4444' if 'RED' in x else '#3B82F6' for x in status_counts.index]
-                        
-                        ax1.pie(status_counts, labels=status_counts.index, autopct='%1.1f%%', startangle=140, colors=colors, textprops={'color':"white", 'weight':'bold'})
-                        fig1.patch.set_alpha(0.0) # Transparent background
-                        st.pyplot(fig1)
-                        plt.close(fig1)
-                        
-                    with chart_col2:
-                        st.markdown("**Acclimatization vs PME Compliance**")
-                        fig2, ax2 = plt.subplots(figsize=(6, 4))
-                        categories = ['Acclimatized (>14d)', 'Pending PME/AME']
-                        counts = [fully_acclim, pending_pme]
-                        ax2.bar(categories, counts, color=['#10B981', '#EF4444'])
-                        ax2.set_ylabel('Number of Troops', color='white')
-                        ax2.tick_params(axis='x', colors='white')
-                        ax2.tick_params(axis='y', colors='white')
-                        ax2.spines['bottom'].set_color('white')
-                        ax2.spines['left'].set_color('white')
-                        ax2.spines['top'].set_visible(False)
-                        ax2.spines['right'].set_visible(False)
-                        fig2.patch.set_alpha(0.0)
-                        ax2.set_facecolor((0, 0, 0, 0))
-                        st.pyplot(fig2)
-                        plt.close(fig2)
-                    
-                    # --- NEW ACCLIMATIZATION GRAPH ---
-                    st.markdown("---")
-                    st.markdown("**Polycythemia Risk (Acclimatization Blood Reports)**")
-                    try:
-                        res_acc = supabase.table("acclimatization_details").select("name, lab_hb, lab_ldh").execute()
-                        df_acc = pd.DataFrame(res_acc.data)
-                        if not df_acc.empty:
-                            df_acc['name'] = df_acc['name'].apply(decrypt_data)
-                            
-                            # Filter for high risk (Hb > 18 or LDH > 300)
-                            high_risk = df_acc[(df_acc['lab_hb'] >= 18.0) | (df_acc['lab_ldh'] >= 300)]
-                            
-                            if not high_risk.empty:
-                                fig3, ax3 = plt.subplots(figsize=(8, 4))
-                                ax3.scatter(high_risk['lab_hb'], high_risk['lab_ldh'], color='#EF4444', s=100, alpha=0.7, edgecolors='white')
-                                
-                                for i, txt in enumerate(high_risk['name']):
-                                    ax3.annotate(txt, (high_risk['lab_hb'].iloc[i], high_risk['lab_ldh'].iloc[i]), xytext=(5,5), textcoords='offset points', color='white', fontsize=8)
-                                    
-                                ax3.set_xlabel('Hemoglobin (g/dL)', color='white')
-                                ax3.set_ylabel('LDH (U/L)', color='white')
-                                ax3.tick_params(colors='white')
-                                ax3.spines['bottom'].set_color('white')
-                                ax3.spines['left'].set_color('white')
-                                ax3.axvline(x=18.0, color='#F59E0B', linestyle='--', alpha=0.5, label='High Hb Threshold')
-                                ax3.axhline(y=300, color='#F59E0B', linestyle='--', alpha=0.5, label='High LDH Threshold')
-                                
-                                fig3.patch.set_alpha(0.0)
-                                ax3.set_facecolor((0,0,0,0))
-                                ax3.legend(facecolor='black', edgecolor='white', labelcolor='white')
-                                st.pyplot(fig3)
-                                plt.close(fig3)
-                            else:
-                                st.success("🟢 No troops currently show high-risk Hb/LDH profiles in acclimatization.")
-                    except Exception as e: pass
-                    # ----------------------------------------------------
-                    
-                    # ----------------------------------------------------
-                    st.markdown("---")
-                    st.subheader("📋 Troop Health Roster")
                     
                     clean_df = disp_df[['army_no', 'rank', 'name', 'post_name', 'Acclimatized', 'ame_pme_done', 'Latest Triage']]
                     clean_df.columns = ['Army No', 'Rank', 'Name', 'Post', 'Acclimatized (>14d)', 'PME Done', 'Latest Med Status']
@@ -2807,23 +2763,24 @@ def main_app():
                 st.subheader("Master Patient Registry Control")
                 st.info("This mirrors the Battalion Registry Base. Changes here apply globally.")
                 
+                # Fetch fresh registry for editing
                 res_rmo_reg = supabase.table("patient_registry").select("*").execute()
                 df_rmo_reg = pd.DataFrame(res_rmo_reg.data)
                 
                 if not df_rmo_reg.empty:
-                    df_rmo_reg['raw_army_no'] = df_rmo_reg['army_no']
+                    df_rmo_reg['raw_army_no'] = df_rmo_reg['army_no'] # Hold original encrypted val
                     df_rmo_reg['army_no'] = df_rmo_reg['army_no'].apply(decrypt_data)
                     df_rmo_reg['name'] = df_rmo_reg['name'].apply(decrypt_data)
                     df_rmo_reg['nok_name'] = df_rmo_reg['nok_name'].apply(decrypt_data)
                     df_rmo_reg['nok_phone'] = df_rmo_reg['nok_phone'].apply(decrypt_data)
                     
                     patient_list = [f"{row['army_no']} - {row['rank']} {row['name']}" for _, row in df_rmo_reg.iterrows()]
-                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list, key="rmo_pt_sel")
+                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list, key="rmo_pt_sel_manage")
                     
                     if selected_pt != "-- Select --":
                         sel_army_no = selected_pt.split(" - ")[0]
                         pt_data = df_rmo_reg[df_rmo_reg['army_no'] == sel_army_no].iloc[0]
-                        target_db_army_no = pt_data['raw_army_no']
+                        target_db_army_no = pt_data['raw_army_no'] # The exact encrypted string in the cloud
                         
                         with st.form("rmo_edit_pt_form"):
                             st.info("Modify any patient field below and click Update to save changes.")
@@ -2900,6 +2857,7 @@ def main_app():
                                     }
                                     
                                     supabase.table("patient_registry").update(update_payload).eq("army_no", target_db_army_no).execute()
+                                    
                                     st.success(f"Successfully updated complete record for {sel_army_no}.")
                                     time.sleep(1)
                                     st.rerun()
@@ -2907,7 +2865,7 @@ def main_app():
                                     st.error(f"Update failed: {e}")
                                     
                         st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary", key="rmo_del_pt"):
+                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary", key="rmo_del_pt_dash"):
                             try:
                                 supabase.table("patient_registry").delete().eq("army_no", target_db_army_no).execute()
                                 st.success(f"Patient {sel_army_no} has been permanently deleted.")
