@@ -2346,6 +2346,7 @@ def main_app():
     # ------------------------------------------
     # 10. RMO DASHBOARD (ADMIN ONLY)
     # ------------------------------------------
+
     elif selected == "RMO Dashboard":
         if st.session_state['bfna_id'] not in ["MASTER_ADMIN", "RMO"]:
             st.error("⚠️ You do not have permission to access the RMO Dashboard.")
@@ -2374,6 +2375,18 @@ def main_app():
                     
                     total_troops = len(reg_df)
                     
+                    # Rank Classification Logic
+                    def categorize_rank(r):
+                        r_str = str(r).lower()
+                        if any(x in r_str for x in ['sub', 'nb']): return 'JCOs'
+                        elif any(x in r_str for x in ['lt', 'capt', 'maj', 'col', 'brig', 'gen']): return 'Officers'
+                        else: return 'NCOs / ORs'
+                    
+                    reg_df['rank_category'] = reg_df['rank'].apply(categorize_rank)
+                    off_count = len(reg_df[reg_df['rank_category'] == 'Officers'])
+                    jco_count = len(reg_df[reg_df['rank_category'] == 'JCOs'])
+                    or_count = len(reg_df[reg_df['rank_category'] == 'NCOs / ORs'])
+                    
                     def calc_acclim(row):
                         try:
                             ind_date = datetime.strptime(row['induction_date'], '%Y-%m-%d').date()
@@ -2392,26 +2405,72 @@ def main_app():
                             latest_hist = latest_hist[latest_hist['post_name'] == view_post]
                         under_obs = len(latest_hist[latest_hist['status_tier'].str.contains('AMBER|RED|YELLOW', case=False, na=False)])
                     
+                    st.markdown("##### 👥 Troop Deployment & Rank Breakdown")
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Total Registered Troops", total_troops)
-                    c2.metric("Fully Acclimatized (>14 Days)", fully_acclim)
-                    c3.metric("Pending PME/AME", pending_pme)
-                    c4.metric("Under Med Observation", under_obs)
+                    c2.metric("Officers", off_count)
+                    c3.metric("JCOs", jco_count)
+                    c4.metric("NCOs / ORs", or_count)
                     
-                    st.markdown("---")
-                    st.subheader("📋 Troop Health Roster")
+                    st.markdown("##### ⚕️ Medical Readiness & Surveillance")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Fully Acclimatized (>14 Days)", fully_acclim)
+                    m2.metric("Pending PME/AME", pending_pme)
+                    m3.metric("Under Med Observation (Amber/Red)", under_obs)
                     
+                    # ----------------------------------------------------
+                    # VISUAL ANALYTICS SECTION
+                    # ----------------------------------------------------
                     if not hist_df.empty:
                         hist_summary = hist_df.sort_values('timestamp').groupby('army_no').tail(1)[['army_no', 'status_tier', 'timestamp']]
                         hist_summary.rename(columns={'status_tier': 'Latest Triage', 'timestamp': 'Last Exam'}, inplace=True)
                         disp_df = pd.merge(reg_df, hist_summary, on='army_no', how='left')
                     else:
                         disp_df = reg_df.copy()
-                        disp_df['Latest Triage'] = "No Data"
+                        disp_df['Latest Triage'] = "Healthy / Unchecked"
                         disp_df['Last Exam'] = "No Data"
                     
                     disp_df['Acclimatized'] = disp_df.apply(calc_acclim, axis=1).map({True: 'Yes', False: 'No'})
                     disp_df['Latest Triage'] = disp_df['Latest Triage'].fillna("Healthy / Unchecked")
+                    
+                    st.markdown("---")
+                    st.subheader("📈 Battalion Health Analytics")
+                    chart_col1, chart_col2 = st.columns(2)
+                    
+                    with chart_col1:
+                        st.markdown("**Current Triage Status Distribution**")
+                        status_counts = disp_df['Latest Triage'].value_counts()
+                        
+                        fig1, ax1 = plt.subplots(figsize=(6, 4))
+                        # Color coding mapping
+                        colors = ['#10B981' if 'Healthy' in x or 'GREEN' in x else '#FBBF24' if 'YELLOW' in x else '#F59E0B' if 'AMBER' in x else '#EF4444' if 'RED' in x else '#3B82F6' for x in status_counts.index]
+                        
+                        ax1.pie(status_counts, labels=status_counts.index, autopct='%1.1f%%', startangle=140, colors=colors, textprops={'color':"white", 'weight':'bold'})
+                        fig1.patch.set_alpha(0.0) # Transparent background
+                        st.pyplot(fig1)
+                        plt.close(fig1)
+                        
+                    with chart_col2:
+                        st.markdown("**Acclimatization vs PME Compliance**")
+                        fig2, ax2 = plt.subplots(figsize=(6, 4))
+                        categories = ['Acclimatized (>14d)', 'Pending PME/AME']
+                        counts = [fully_acclim, pending_pme]
+                        ax2.bar(categories, counts, color=['#10B981', '#EF4444'])
+                        ax2.set_ylabel('Number of Troops', color='white')
+                        ax2.tick_params(axis='x', colors='white')
+                        ax2.tick_params(axis='y', colors='white')
+                        ax2.spines['bottom'].set_color('white')
+                        ax2.spines['left'].set_color('white')
+                        ax2.spines['top'].set_visible(False)
+                        ax2.spines['right'].set_visible(False)
+                        fig2.patch.set_alpha(0.0)
+                        ax2.set_facecolor((0, 0, 0, 0))
+                        st.pyplot(fig2)
+                        plt.close(fig2)
+                    
+                    # ----------------------------------------------------
+                    st.markdown("---")
+                    st.subheader("📋 Troop Health Roster")
                     
                     clean_df = disp_df[['army_no', 'rank', 'name', 'post_name', 'Acclimatized', 'ame_pme_done', 'Latest Triage']]
                     clean_df.columns = ['Army No', 'Rank', 'Name', 'Post', 'Acclimatized (>14d)', 'PME Done', 'Latest Med Status']
@@ -2431,11 +2490,11 @@ def main_app():
                 st.subheader("Master Patient Registry Control")
                 st.info("This mirrors the Battalion Registry Base. Changes here apply globally.")
                 
-                # Fetch fresh registry for editing
                 res_rmo_reg = supabase.table("patient_registry").select("*").execute()
                 df_rmo_reg = pd.DataFrame(res_rmo_reg.data)
                 
                 if not df_rmo_reg.empty:
+                    df_rmo_reg['raw_army_no'] = df_rmo_reg['army_no']
                     df_rmo_reg['army_no'] = df_rmo_reg['army_no'].apply(decrypt_data)
                     df_rmo_reg['name'] = df_rmo_reg['name'].apply(decrypt_data)
                     df_rmo_reg['nok_name'] = df_rmo_reg['nok_name'].apply(decrypt_data)
@@ -2447,6 +2506,7 @@ def main_app():
                     if selected_pt != "-- Select --":
                         sel_army_no = selected_pt.split(" - ")[0]
                         pt_data = df_rmo_reg[df_rmo_reg['army_no'] == sel_army_no].iloc[0]
+                        target_db_army_no = pt_data['raw_army_no']
                         
                         with st.form("rmo_edit_pt_form"):
                             st.info("Modify any patient field below and click Update to save changes.")
@@ -2497,7 +2557,6 @@ def main_app():
                             if st.form_submit_button("🔄 UPDATE ENTIRE PROFILE", type="primary"):
                                 try:
                                     up_name = encrypt_data(e_name)
-                                    up_army = encrypt_data(sel_army_no)
                                     up_nok_name = encrypt_data(e_nok_name)
                                     up_nok_phone = encrypt_data(e_nok_phone)
                                     
@@ -2523,8 +2582,7 @@ def main_app():
                                         "post_name": e_post
                                     }
                                     
-                                    supabase.table("patient_registry").update(update_payload).eq("army_no", up_army).execute()
-                                    
+                                    supabase.table("patient_registry").update(update_payload).eq("army_no", target_db_army_no).execute()
                                     st.success(f"Successfully updated complete record for {sel_army_no}.")
                                     time.sleep(1)
                                     st.rerun()
@@ -2534,8 +2592,7 @@ def main_app():
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary", key="rmo_del_pt"):
                             try:
-                                del_army = encrypt_data(sel_army_no)
-                                supabase.table("patient_registry").delete().eq("army_no", del_army).execute()
+                                supabase.table("patient_registry").delete().eq("army_no", target_db_army_no).execute()
                                 st.success(f"Patient {sel_army_no} has been permanently deleted.")
                                 time.sleep(1)
                                 st.rerun()
