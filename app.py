@@ -83,6 +83,47 @@ def get_patient_record(army_no_query):
         return row
     return None
 
+def clean_all_duplicates():
+    """Silently scans and removes encrypted duplicate records across all tables on startup."""
+    # 1. Clean Patient Registry (Only 1 profile allowed per Army No)
+    try:
+        res = supabase.table("patient_registry").select("army_no").execute()
+        if res.data:
+            df = pd.DataFrame(res.data)
+            df['dec_army'] = df['army_no'].apply(decrypt_data).str.strip().str.upper()
+            dups = df[df.duplicated(subset=['dec_army'], keep='first')]
+            for raw_army in dups['army_no']: 
+                supabase.table("patient_registry").delete().eq("army_no", raw_army).execute()
+    except Exception: pass
+
+    # 2. Clean Patient History (Prevents double-clicking save on the same triage form)
+    try:
+        res = supabase.table("patient_history").select("id, army_no, timestamp, module").execute()
+        if res.data:
+            df = pd.DataFrame(res.data)
+            df['dec_army'] = df['army_no'].apply(decrypt_data).str.strip().str.upper()
+            dups = df[df.duplicated(subset=['dec_army', 'timestamp', 'module'], keep='first')]
+            for rid in dups['id']: 
+                supabase.table("patient_history").delete().eq("id", rid).execute()
+    except Exception: pass
+
+    # 3. Clean Weekly Vitals & Acclimatization
+    for table in ["weekly_vitals", "acclimatization_details"]:
+        try:
+            res = supabase.table(table).select("id, army_no, timestamp").execute()
+            if res.data:
+                df = pd.DataFrame(res.data)
+                df['dec_army'] = df['army_no'].apply(decrypt_data).str.strip().str.upper()
+                dups = df[df.duplicated(subset=['dec_army', 'timestamp'], keep='first')]
+                for rid in dups['id']: 
+                    supabase.table(table).delete().eq("id", rid).execute()
+        except Exception: pass
+
+# Run cleanup silently once when the app boots up
+if 'dedup_done' not in st.session_state:
+    clean_all_duplicates()
+    st.session_state['dedup_done'] = True
+
 def parse_date_safe(date_str, default_year=2000):
     if not date_str or date_str == "N/A":
         return datetime.now().date()
@@ -705,8 +746,15 @@ def create_pdf_report(module_name, status_tier, flags_list, final_order, temp_va
 def save_to_ledger(rank, name, army_no, location, module, status_tier, flags_list, final_order, audio_bytes=None):
     
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-    flags_str = ", ".join(flags_list) if flags_list else "None"
     
+    # --- DOUBLE-CLICK PREVENTION ---
+    res_dup = supabase.table("patient_history").select("army_no, timestamp, module").eq("module", module).eq("timestamp", timestamp).execute()
+    existing_logs = [decrypt_data(r['army_no']).strip().upper() for r in (res_dup.data if res_dup.data else [])]
+    if army_no.strip().upper() in existing_logs:
+        return  # Silently ignore the duplicate click because the record is already saved
+    # -------------------------------
+    
+    flags_str = ", ".join(flags_list) if flags_list else "None"
     enc_name = encrypt_data(name)
     enc_army_no = encrypt_data(army_no)
     enc_location = encrypt_data(location)
@@ -776,7 +824,7 @@ def login_page():
 
 def main_app():
     
-    menu_items = ["Heart Disease", "Brain Stroke / HACE", "AMS", "HAPE", "Cold Injuries", "Weekly Vitals", "Patient History", "Patient Registration"]
+    menu_items = ["Heart Disease", "Brain Stroke / HACE", "AMS", "HAPE", "Cold Injuries", "Weekly Vitals", "Acclimatization", "Patient History", "Patient Registration"]
     if st.session_state['bfna_id'] in ['RMO', 'MASTER_ADMIN']:
         menu_items.append("RMO Dashboard")
         menu_items.append("Admin Settings")
@@ -787,19 +835,7 @@ def main_app():
         st.markdown("---")
         st.success(f"👤 **BFNA ID:** {st.session_state['bfna_id']}\n\n📍 **POST:** {st.session_state['post_name']}")
         
-        # --- GLOBAL LIVE AUTO-REFRESH FEATURE ---
-        st.markdown("---")
-        live_sync = st.toggle("🔄 Global Auto-Refresh (30s)", value=False)
-        if live_sync:
-            try:
-                from streamlit_autorefresh import st_autorefresh
-                st_autorefresh(interval=30000, limit=None, key="global_refresh")
-                st.caption(f"Last Synced: {datetime.now().strftime('%H:%M:%S')}")
-            except ImportError:
-                st.error("⚠️ The 'streamlit-autorefresh' package is missing. Please run `pip install streamlit-autorefresh`.")
-        st.markdown("---")
-        
-        icons_list = ["heart-pulse", "lightning-charge", "triangle-half", "lungs", "thermometer-snow", "clipboard2-pulse", "journal-medical", "person-badge"]
+        icons_list = ["heart-pulse", "lightning-charge", "triangle-half", "lungs", "thermometer-snow", "clipboard2-pulse", "activity", "journal-medical", "person-badge"]
         if st.session_state['bfna_id'] in ['RMO', 'MASTER_ADMIN']:
             icons_list.extend(["bar-chart-fill", "gear"])
             
@@ -1856,24 +1892,32 @@ def main_app():
                 
                 if st.form_submit_button("SAVE TO WEEKLY LEDGER", type="primary"):
                     if v_army_no.strip():
-                        enc_v_army = encrypt_data(v_army_no)
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
                         
-                        insert_data = {
-                            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M'),
-                            "bfna_id": st.session_state['bfna_id'],
-                            "post_name": st.session_state['post_name'],
-                            "army_no": enc_v_army,
-                            "sys_bp": v_sys,
-                            "dia_bp": v_dia,
-                            "pulse": v_pul,
-                            "spo2": v_spo2,
-                            "resp_rate": v_rr
-                        }
-                        try:
-                            supabase.table("weekly_vitals").insert(insert_data).execute()
-                            st.success(f"✅ Vitals logged for {v_army_no} at {st.session_state['post_name']}.")
-                        except Exception as e:
-                            st.error(f"Error saving to Supabase: {e}")
+                        # Prevent duplicate saving if user double-clicks fast
+                        res_dup = supabase.table("weekly_vitals").select("army_no, timestamp").eq("timestamp", timestamp).execute()
+                        existing_logs = [decrypt_data(r['army_no']).strip().upper() for r in (res_dup.data if res_dup.data else [])]
+                        
+                        if v_army_no.strip().upper() in existing_logs:
+                            st.warning("⚠️ This vital record was just saved. Please wait a minute before logging again.")
+                        else:
+                            enc_v_army = encrypt_data(v_army_no)
+                            insert_data = {
+                                "timestamp": timestamp,
+                                "bfna_id": st.session_state['bfna_id'],
+                                "post_name": st.session_state['post_name'],
+                                "army_no": enc_v_army,
+                                "sys_bp": v_sys,
+                                "dia_bp": v_dia,
+                                "pulse": v_pul,
+                                "spo2": v_spo2,
+                                "resp_rate": v_rr
+                            }
+                            try:
+                                supabase.table("weekly_vitals").insert(insert_data).execute()
+                                st.success(f"✅ Vitals logged for {v_army_no.upper()} at {st.session_state['post_name']}.")
+                            except Exception as e:
+                                st.error(f"Error saving to Supabase: {e}")
                     else:
                         st.error("Army No is required.")
                         
@@ -1916,22 +1960,25 @@ def main_app():
                         
                         # RBAC: Only Admin/RMO can delete
                         if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                            st.markdown("---")
+                            st.subheader("Edit or Delete Vitals Record")
+                            
+                            vitals_list = [f"ID: {row['id']} | {row['timestamp']} | {row['army_no']} | BP: {row['sys_bp']}/{row['dia_bp']}" for _, row in v_df.iterrows()]
+                            selected_vital = st.selectbox("Select Record to Delete", ["-- Select --"] + vitals_list, key="sel_del_vital")
+                            
                             col_del1, col_del2 = st.columns(2)
                             with col_del1:
-                                del_id = st.text_input("Enter Row ID to Delete:", key="del_w_id")
-                            if st.button("Delete Record"):
-                                if del_id.isdigit():
-                                    try:
-                                        # Force integer cast here
-                                        supabase.table("weekly_vitals").delete().eq("id", int(del_id)).execute()
-                                        st.success(f"Record {del_id} deleted.")
+                                if st.button("🗑️ Delete Selected Record", type="secondary"):
+                                    if selected_vital != "-- Select --":
+                                        target_id = int(selected_vital.split("ID: ")[1].split(" |")[0])
+                                        supabase.table("weekly_vitals").delete().eq("id", target_id).execute()
+                                        st.success("Record successfully deleted.")
                                         time.sleep(1)
                                         st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Deletion failed: {e}")
+                                    else:
+                                        st.warning("Please select a record first.")
                             with col_del2:
-                                st.warning("Clear entirely.")
-                                if st.button("CLEAR ALL VITALS"):
+                                if st.button("🚨 CLEAR ALL VITALS", type="primary"):
                                     supabase.table("weekly_vitals").delete().eq("post_name", st.session_state['post_name']).execute()
                                     st.success("All records cleared.")
                                     time.sleep(1)
@@ -1972,6 +2019,205 @@ def main_app():
                     st.pyplot(fig)
                 else:
                     st.warning("No data found for this soldier.")
+
+    
+    # ------------------------------------------
+    # NEW MODULE: ACCLIMATIZATION TRACKER
+    # ------------------------------------------
+    elif selected == "Acclimatization":
+        st.markdown("### 🏔️ ACCLIMATIZATION PROTOCOL (STAGE 1 & 2)")
+        st.markdown("<hr style='margin-top: 5px; margin-bottom: 20px;'>", unsafe_allow_html=True)
+        
+        tab_search, tab_entry, tab_records = st.tabs(["🔍 Patient Search", "📝 Acclimatization Entry", "📊 Post-Wise Records"])
+        
+        if 'acc_patient' not in st.session_state: st.session_state['acc_patient'] = None
+        
+        with tab_search:
+            st.markdown("Enter Army No. to pull patient dossier for Acclimatization logging.")
+            search_army = st.text_input("Army / Service No.")
+            if st.button("Fetch Patient", type="primary"):
+                pt_rec = get_patient_record(search_army)
+                if pt_rec:
+                    st.session_state['acc_patient'] = pt_rec
+                    st.success(f"✅ Patient Found: {pt_rec['rank']} {pt_rec['name']}")
+                else:
+                    st.session_state['acc_patient'] = None
+                    st.error("❌ Patient not found in Battalion Registry. Please register them first.")
+                    
+            if st.session_state['acc_patient']:
+                p = st.session_state['acc_patient']
+                st.info(f"**Selected Patient:** {p['rank']} {p['name']} | **Coy:** {p['company']} | **Inducted:** {p['induction_date']}")
+
+        with tab_entry:
+            if not st.session_state['acc_patient']:
+                st.warning("Please search and select a patient in the first tab.")
+            else:
+                p = st.session_state['acc_patient']
+                
+                with st.form("acc_form"):
+                    st.subheader("Stage 1 Acclimatization (Day 1 to 6)")
+                    
+                    st.markdown("**Daily Vitals**")
+                    s1_vitals = {}
+                    cols1 = st.columns(6)
+                    for day in range(1, 7):
+                        with cols1[day-1]:
+                            st.markdown(f"**Day {day}**")
+                            sys = st.number_input("Sys", 60, 200, 120, key=f"s1_s_{day}")
+                            dia = st.number_input("Dia", 40, 120, 80, key=f"s1_d_{day}")
+                            pul = st.number_input("Pul", 40, 150, 72, key=f"s1_p_{day}")
+                            s1_vitals[f"Day_{day}"] = {"sys": sys, "dia": dia, "pulse": pul}
+                            
+                    st.markdown("---")
+                    st.markdown("**Blood & Serum / Renal Profile**")
+                    lc1, lc2, lc3, lc4 = st.columns(4)
+                    hb = lc1.number_input("Hb (gm/dL)", 5.0, 25.0, 15.0, step=0.1)
+                    tlc = lc2.number_input("TLC (/cumm)", 1000, 20000, 4800)
+                    pltl = lc3.number_input("Platelets (x10³)", 50, 500, 180)
+                    ldh = lc4.number_input("LDH (U/L)", 100, 1000, 410)
+                    
+                    bili = lc1.number_input("Total Bilirubin", 0.1, 10.0, 2.1, step=0.1)
+                    sgot = lc2.number_input("SGOT (AST)", 0, 200, 25)
+                    sgpt = lc3.number_input("SGPT (ALT)", 0, 200, 27)
+                    
+                    st.markdown("**Lipid Profile**")
+                    l_c1, l_c2, l_c3 = st.columns(3)
+                    chol = l_c1.number_input("Total Cholesterol", 100, 400, 190)
+                    trig = l_c2.number_input("Triglyceride", 50, 500, 286)
+                    ldl = l_c3.number_input("LDL Cholesterol", 50, 300, 130)
+                    
+                    s1_probs = st.text_area("Stage 1 Problems / Complications (Leave blank if normal)")
+                    
+                    st.markdown("---")
+                    st.subheader("Stage 2 Acclimatization (Day 7 to 10)")
+                    st.markdown("**Daily Vitals**")
+                    s2_vitals = {}
+                    cols2 = st.columns(4)
+                    for day in range(7, 11):
+                        with cols2[day-7]:
+                            st.markdown(f"**Day {day}**")
+                            sys2 = st.number_input("Sys", 60, 200, 120, key=f"s2_s_{day}")
+                            dia2 = st.number_input("Dia", 40, 120, 80, key=f"s2_d_{day}")
+                            pul2 = st.number_input("Pul", 40, 150, 72, key=f"s2_p_{day}")
+                            s2_vitals[f"Day_{day}"] = {"sys": sys2, "dia": dia2, "pulse": pul2}
+                            
+                    s2_probs = st.text_area("Stage 2 Problems / Complications (Leave blank if normal)")
+                    
+                    status_opt = st.selectbox("Acclimatization Status", ["In Progress", "Completed Successfully", "Halted / Medical Issue"])
+                    
+                    if st.form_submit_button("💾 SAVE & GENERATE PDF", type="primary"):
+                        enc_army = encrypt_data(p['army_no'])
+                        enc_name = encrypt_data(p['name'])
+                        
+                        import json
+                        insert_data = {
+                            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            "bfna_id": st.session_state['bfna_id'],
+                            "post_name": st.session_state['post_name'],
+                            "army_no": enc_army, "rank": p['rank'], "name": enc_name,
+                            "s1_vitals": s1_vitals, "s2_vitals": s2_vitals,
+                            "lab_hb": hb, "lab_tlc": tlc, "lab_platelets": pltl, "lab_ldh": ldh,
+                            "lab_tot_bili": bili, "lab_sgot": sgot, "lab_sgpt": sgpt,
+                            "lab_tot_chol": chol, "lab_triglycerides": trig, "lab_ldl": ldl,
+                            "stage_1_problems": s1_probs if s1_probs else "None",
+                            "stage_2_problems": s2_probs if s2_probs else "None",
+                            "status": status_opt
+                        }
+                        
+                        try:
+                            supabase.table("acclimatization_details").insert(insert_data).execute()
+                            st.success("Record Saved to Supabase!")
+                            
+                            # Generate PDF
+                            if fpdf_available:
+                                class AccPDF(FPDF):
+                                    def header(self):
+                                        self.set_font('Arial', 'B', 15)
+                                        self.cell(0, 10, 'ACCLIMATIZATION REPORT (STAGE 1 & 2)', 0, 1, 'C')
+                                        self.ln(5)
+                                pdf = AccPDF()
+                                pdf.add_page()
+                                pdf.set_font('Arial', 'B', 12)
+                                pdf.set_fill_color(220, 230, 245)
+                                pdf.cell(0, 8, ' PATIENT DETAILS', 0, 1, 'L', fill=True)
+                                pdf.set_font('Arial', '', 10)
+                                pdf.cell(95, 6, f"Rank & Name: {p['rank']} {p['name']}", border=0)
+                                pdf.cell(95, 6, f"Army No: {p['army_no']}", border=0, ln=1)
+                                pdf.cell(95, 6, f"Coy: {p['company']}", border=0)
+                                pdf.cell(95, 6, f"Induction Date: {p['induction_date']}", border=0, ln=1)
+                                pdf.ln(5)
+                                
+                                pdf.set_font('Arial', 'B', 12)
+                                pdf.cell(0, 8, ' STAGE 1 ACCLIMATIZATION (DAY 1 - 6)', 0, 1, 'L', fill=True)
+                                pdf.set_font('Arial', '', 10)
+                                for d in range(1, 7):
+                                    v = s1_vitals[f"Day_{d}"]
+                                    pdf.cell(0, 6, f"Day {d}: BP {v['sys']}/{v['dia']} | Pulse {v['pulse']}", 0, 1)
+                                pdf.ln(3)
+                                pdf.set_font('Arial', 'B', 10)
+                                pdf.cell(0, 6, 'Blood & Lipid Profile:', 0, 1)
+                                pdf.set_font('Arial', '', 10)
+                                pdf.cell(95, 6, f"Hb: {hb} | TLC: {tlc} | Platelets: {pltl}", 0)
+                                pdf.cell(95, 6, f"LDH: {ldh} | Tot Bili: {bili}", 0, ln=1)
+                                pdf.cell(0, 6, f"SGOT: {sgot} | SGPT: {sgpt} | Chol: {chol} | Trig: {trig} | LDL: {ldl}", 0, 1)
+                                pdf.cell(0, 6, f"Stage 1 Problems: {s1_probs if s1_probs else 'None'}", 0, 1)
+                                pdf.ln(5)
+                                
+                                pdf.set_font('Arial', 'B', 12)
+                                pdf.cell(0, 8, ' STAGE 2 ACCLIMATIZATION (DAY 7 - 10)', 0, 1, 'L', fill=True)
+                                pdf.set_font('Arial', '', 10)
+                                for d in range(7, 11):
+                                    v = s2_vitals[f"Day_{d}"]
+                                    pdf.cell(0, 6, f"Day {d}: BP {v['sys']}/{v['dia']} | Pulse {v['pulse']}", 0, 1)
+                                pdf.cell(0, 6, f"Stage 2 Problems: {s2_probs if s2_probs else 'None'}", 0, 1)
+                                pdf.ln(5)
+                                pdf.set_font('Arial', 'B', 11)
+                                pdf.cell(0, 8, f"FINAL STATUS: {status_opt.upper()}", 0, 1)
+                                
+                                pdf_bytes = pdf.output(dest='S').encode('latin-1')
+                                st.download_button("📄 DOWNLOAD ACCLIMATIZATION PDF", pdf_bytes, f"Acclim_{p['army_no']}.pdf", "application/pdf")
+                            
+                        except Exception as e:
+                            st.error(f"Save failed: {e}")
+
+        with tab_records:
+            st.subheader(f"Acclimatization Records for {st.session_state['post_name']}")
+            try:
+                # We added 'id' to the select query so we can target it for deletion
+                if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                    res_acc = supabase.table("acclimatization_details").select("id, timestamp, army_no, rank, name, status, stage_1_problems, post_name").order("timestamp", desc=True).execute()
+                else:
+                    res_acc = supabase.table("acclimatization_details").select("id, timestamp, army_no, rank, name, status, stage_1_problems").eq("post_name", st.session_state['post_name']).order("timestamp", desc=True).execute()
+                
+                df_acc = pd.DataFrame(res_acc.data)
+                if not df_acc.empty:
+                    df_acc['army_no'] = df_acc['army_no'].apply(decrypt_data)
+                    df_acc['name'] = df_acc['name'].apply(decrypt_data)
+                    
+                    # Show dataframe without the ID column for a cleaner look
+                    st.dataframe(df_acc.drop(columns=['id']), use_container_width=True, hide_index=True)
+                    
+                    # Deletion Logic
+                    if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                        st.markdown("---")
+                        st.subheader("Delete Acclimatization Record")
+                        
+                        acc_list = [f"ID: {row['id']} | {row['timestamp']} | {row['army_no']} | {row['status']}" for _, row in df_acc.iterrows()]
+                        selected_acc = st.selectbox("Select Record to Delete", ["-- Select --"] + acc_list, key="sel_del_acc")
+                        
+                        if st.button("🗑️ Delete Selected Record", type="secondary"):
+                            if selected_acc != "-- Select --":
+                                target_id = int(selected_acc.split("ID: ")[1].split(" |")[0])
+                                supabase.table("acclimatization_details").delete().eq("id", target_id).execute()
+                                st.success("Record successfully deleted.")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.warning("Please select a record first.")
+                else:
+                    st.info("No acclimatization records logged yet.")
+            except Exception as e:
+                st.error(f"Error loading records: {e}")
 
     # ------------------------------------------
     # 8. PATIENT HISTORY & LEDGER
@@ -2055,29 +2301,39 @@ def main_app():
                 st.subheader("Manage Database Records")
                 if not df.empty:
                     st.dataframe(df[['id', 'timestamp', 'name', 'army_no', 'module', 'post_name']])
-                
-                del_col1, del_col2 = st.columns(2)
-                with del_col1:
-                    st.write("Delete a Specific Record")
-                    del_id = st.text_input("Enter Row ID to Delete:", key="del_ph")
-                    if st.button("Delete Record", type="secondary"):
-                        if del_id.isdigit():
-                            try:
-                                # Force integer cast here
-                                supabase.table("patient_history").delete().eq("id", int(del_id)).execute()
-                                st.success(f"Record {del_id} deleted.")
+                    
+                    st.markdown("---")
+                    st.subheader("Delete Specific Triage Record")
+                    
+                    # Generate dropdown list using the exact Supabase ID
+                    hist_list = [f"ID: {row['id']} | {row['timestamp']} | {row['army_no']} | {row['module']}" for _, row in df.iterrows()]
+                    selected_hist = st.selectbox("Select Record to Delete", ["-- Select --"] + hist_list, key="sel_del_hist")
+                    
+                    del_col1, del_col2 = st.columns(2)
+                    with del_col1:
+                        if st.button("🗑️ Delete Selected Record", type="secondary"):
+                            if selected_hist != "-- Select --":
+                                # Extract just the number from the string
+                                target_id = int(selected_hist.split("ID: ")[1].split(" |")[0])
+                                supabase.table("patient_history").delete().eq("id", target_id).execute()
+                                st.success("Record successfully deleted.")
                                 time.sleep(1)
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"Deletion failed: {e}")
-                with del_col2:
-                    st.write("Clear All Records")
-                    st.warning("⚠️ This will permanently delete records.")
-                    if st.button("CLEAR ALL RECORDS", type="primary"):
-                        supabase.table("patient_history").delete().neq("id", 0).execute() # Deletes all
-                        st.success("Records cleared.")
-                        time.sleep(1)
-                        st.rerun()
+                            else:
+                                st.warning("Please select a record from the dropdown first.")
+                                
+                    with del_col2:
+                        st.warning("⚠️ This will permanently delete records.")
+                        if st.button("🚨 CLEAR ALL RECORDS", type="primary"):
+                            if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
+                                supabase.table("patient_history").delete().neq("id", 0).execute()
+                            else:
+                                supabase.table("patient_history").delete().eq("post_name", st.session_state['post_name']).execute()
+                            st.success("Records cleared.")
+                            time.sleep(1)
+                            st.rerun()
+                else:
+                    st.info("No records to manage.")
             else:
                 st.info("⚠️ BFNAs have View-Only access to Manage Records. Please contact the RMO to delete historical entries.")
 
@@ -2182,13 +2438,14 @@ def main_app():
                 if not reg_army_no.strip() or not reg_name.strip() or not reg_rank.strip() or not reg_coy.strip():
                     st.error("⚠️ Please fill all mandatory fields (Army No, Rank, Name, Company).")
                 else:
-                    enc_army = encrypt_data(reg_army_no)
+                    # Bulletproof Cloud Duplicate Check (Decrypted & Case-Insensitive)
+                    res_dup = supabase.table("patient_registry").select("army_no").execute()
+                    existing_armies = [decrypt_data(row['army_no']).strip().upper() for row in (res_dup.data if res_dup.data else [])]
                     
-                    # Cloud Duplicate Check
-                    res = supabase.table("patient_registry").select("*").eq("army_no", enc_army).execute()
-                    if res.data:
-                        st.error(f"⚠️ Registration Failed: Patient with Army No '{reg_army_no}' is already registered.")
+                    if reg_army_no.strip().upper() in existing_armies:
+                        st.error(f"⚠️ Registration Failed: Patient with Army No '{reg_army_no.upper()}' is already registered in the Battalion.")
                     else:
+                        enc_army = encrypt_data(reg_army_no)
                         enc_name = encrypt_data(reg_name)
                         enc_nok_name = encrypt_data(nok_name)
                         enc_nok_phone = encrypt_data(nok_phone)
@@ -2204,7 +2461,7 @@ def main_app():
                         
                         try:
                             supabase.table("patient_registry").upsert(reg_data).execute()
-                            st.success(f"✅ Patient {reg_army_no} successfully registered in Battalion Database.")
+                            st.success(f"✅ Patient {reg_army_no.upper()} successfully registered in Battalion Database.")
                             time.sleep(1)
                             st.rerun()
                         except Exception as e:
@@ -2348,10 +2605,33 @@ def main_app():
     # ------------------------------------------
 
     elif selected == "RMO Dashboard":
+
         if st.session_state['bfna_id'] not in ["MASTER_ADMIN", "RMO"]:
             st.error("⚠️ You do not have permission to access the RMO Dashboard.")
         else:
             tab_dash, tab_manage_pts = st.tabs(["📊 Readiness Dashboard", "🗄️ Modify/Delete Patients"])
+            
+            with tab_dash:
+                st.markdown("### 📊 POST-WISE MEDICAL READINESS DASHBOARD")
+                st.markdown("Real-time combat readiness and health surveillance overview.")
+                
+                # --- SAFE RMO-ONLY AUTO REFRESH ---
+                col_ref, col_time = st.columns([1, 2])
+                with col_ref:
+                    live_sync = st.toggle("🔄 Live Auto-Refresh (30s)", value=False)
+                with col_time:
+                    st.caption(f"Last Synced: {datetime.now().strftime('%H:%M:%S')}")
+                
+                if live_sync:
+                    try:
+                        from streamlit_autorefresh import st_autorefresh
+                        st_autorefresh(interval=30000, limit=None, key="rmo_dash_refresh")
+                    except ImportError: pass
+                st.markdown("---")
+                # ----------------------------------
+
+            view_post = st.selectbox("Select Post to View", ["All Posts"] + GLOBAL_POSTS, key="rmo_dash_post_sel")
+
             
             with tab_dash:
                 st.markdown("### 📊 POST-WISE MEDICAL READINESS DASHBOARD")
@@ -2467,6 +2747,43 @@ def main_app():
                         ax2.set_facecolor((0, 0, 0, 0))
                         st.pyplot(fig2)
                         plt.close(fig2)
+                    
+                    # --- NEW ACCLIMATIZATION GRAPH ---
+                    st.markdown("---")
+                    st.markdown("**Polycythemia Risk (Acclimatization Blood Reports)**")
+                    try:
+                        res_acc = supabase.table("acclimatization_details").select("name, lab_hb, lab_ldh").execute()
+                        df_acc = pd.DataFrame(res_acc.data)
+                        if not df_acc.empty:
+                            df_acc['name'] = df_acc['name'].apply(decrypt_data)
+                            
+                            # Filter for high risk (Hb > 18 or LDH > 300)
+                            high_risk = df_acc[(df_acc['lab_hb'] >= 18.0) | (df_acc['lab_ldh'] >= 300)]
+                            
+                            if not high_risk.empty:
+                                fig3, ax3 = plt.subplots(figsize=(8, 4))
+                                ax3.scatter(high_risk['lab_hb'], high_risk['lab_ldh'], color='#EF4444', s=100, alpha=0.7, edgecolors='white')
+                                
+                                for i, txt in enumerate(high_risk['name']):
+                                    ax3.annotate(txt, (high_risk['lab_hb'].iloc[i], high_risk['lab_ldh'].iloc[i]), xytext=(5,5), textcoords='offset points', color='white', fontsize=8)
+                                    
+                                ax3.set_xlabel('Hemoglobin (g/dL)', color='white')
+                                ax3.set_ylabel('LDH (U/L)', color='white')
+                                ax3.tick_params(colors='white')
+                                ax3.spines['bottom'].set_color('white')
+                                ax3.spines['left'].set_color('white')
+                                ax3.axvline(x=18.0, color='#F59E0B', linestyle='--', alpha=0.5, label='High Hb Threshold')
+                                ax3.axhline(y=300, color='#F59E0B', linestyle='--', alpha=0.5, label='High LDH Threshold')
+                                
+                                fig3.patch.set_alpha(0.0)
+                                ax3.set_facecolor((0,0,0,0))
+                                ax3.legend(facecolor='black', edgecolor='white', labelcolor='white')
+                                st.pyplot(fig3)
+                                plt.close(fig3)
+                            else:
+                                st.success("🟢 No troops currently show high-risk Hb/LDH profiles in acclimatization.")
+                    except Exception as e: pass
+                    # ----------------------------------------------------
                     
                     # ----------------------------------------------------
                     st.markdown("---")
