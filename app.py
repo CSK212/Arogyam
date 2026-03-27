@@ -15,9 +15,6 @@ import time
 # --- SUPABASE IMPORT ---
 from supabase import create_client, Client
 
-# --- SUPABASE IMPORT ---
-from supabase import create_client, Client
-
 # ==========================================
 # PAGE CONFIG (MUST BE FIRST STREAMLIT COMMAND)
 # ==========================================
@@ -1922,12 +1919,16 @@ def main_app():
                             col_del1, col_del2 = st.columns(2)
                             with col_del1:
                                 del_id = st.text_input("Enter Row ID to Delete:", key="del_w_id")
-                                if st.button("Delete Record"):
-                                    if del_id.isdigit():
-                                        supabase.table("weekly_vitals").delete().eq("id", del_id).execute()
+                            if st.button("Delete Record"):
+                                if del_id.isdigit():
+                                    try:
+                                        # Force integer cast here
+                                        supabase.table("weekly_vitals").delete().eq("id", int(del_id)).execute()
                                         st.success(f"Record {del_id} deleted.")
                                         time.sleep(1)
                                         st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Deletion failed: {e}")
                             with col_del2:
                                 st.warning("Clear entirely.")
                                 if st.button("CLEAR ALL VITALS"):
@@ -2061,10 +2062,14 @@ def main_app():
                     del_id = st.text_input("Enter Row ID to Delete:", key="del_ph")
                     if st.button("Delete Record", type="secondary"):
                         if del_id.isdigit():
-                            supabase.table("patient_history").delete().eq("id", del_id).execute()
-                            st.success(f"Record {del_id} deleted.")
-                            time.sleep(1)
-                            st.rerun()
+                            try:
+                                # Force integer cast here
+                                supabase.table("patient_history").delete().eq("id", int(del_id)).execute()
+                                st.success(f"Record {del_id} deleted.")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Deletion failed: {e}")
                 with del_col2:
                     st.write("Clear All Records")
                     st.warning("⚠️ This will permanently delete records.")
@@ -2212,6 +2217,9 @@ def main_app():
             df_manage = pd.DataFrame(res_manage.data)
             
             if not df_manage.empty:
+                # 1. HOLD THE ORIGINAL ENCRYPTED ID FOR SUPABASE
+                df_manage['raw_army_no'] = df_manage['army_no'] 
+                
                 df_manage['army_no'] = df_manage['army_no'].apply(decrypt_data)
                 df_manage['name'] = df_manage['name'].apply(decrypt_data)
                 df_manage['nok_name'] = df_manage['nok_name'].apply(decrypt_data)
@@ -2221,7 +2229,7 @@ def main_app():
                 if search_reg:
                     df_manage = df_manage[df_manage['army_no'].str.contains(search_reg, case=False, na=False) | df_manage['name'].str.contains(search_reg, case=False, na=False)]
                 
-                st.dataframe(df_manage, use_container_width=True, hide_index=True)
+                st.dataframe(df_manage.drop(columns=['raw_army_no']), use_container_width=True, hide_index=True)
                 
                 # RBAC for Modifying or Deleting Patient Registry
                 if st.session_state['bfna_id'] in ["MASTER_ADMIN", "RMO"]:
@@ -2229,13 +2237,16 @@ def main_app():
                     st.subheader("Edit or Delete Patient Profile")
                     
                     patient_list = [f"{row['army_no']} - {row['rank']} {row['name']}" for _, row in df_manage.iterrows()]
-                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list)
+                    selected_pt = st.selectbox("Select Patient to Modify", ["-- Select --"] + patient_list, key="rmo_pt_sel")
                     
                     if selected_pt != "-- Select --":
                         sel_army_no = selected_pt.split(" - ")[0]
                         pt_data = df_manage[df_manage['army_no'] == sel_army_no].iloc[0]
                         
-                        with st.form("edit_pt_form"):
+                        # 2. ASSIGN THE TARGET HASH
+                        target_db_army_no = pt_data['raw_army_no'] 
+                        
+                        with st.form("rmo_edit_pt_form"):
                             st.info("Modify any patient field below and click Update to save changes.")
                             
                             e_c1, e_c2, e_c3 = st.columns(3)
@@ -2284,7 +2295,6 @@ def main_app():
                             if st.form_submit_button("🔄 UPDATE ENTIRE PROFILE", type="primary"):
                                 try:
                                     up_name = encrypt_data(e_name)
-                                    up_army = encrypt_data(sel_army_no)
                                     up_nok_name = encrypt_data(e_nok_name)
                                     up_nok_phone = encrypt_data(e_nok_phone)
                                     
@@ -2309,8 +2319,8 @@ def main_app():
                                         "nok_district": e_nok_dist,
                                         "post_name": e_post
                                     }
-                                    
-                                    supabase.table("patient_registry").update(update_payload).eq("army_no", up_army).execute()
+                                    # 3. USE TARGET HASH TO UPDATE
+                                    supabase.table("patient_registry").update(update_payload).eq("army_no", target_db_army_no).execute()
                                     
                                     st.success(f"Successfully updated complete record for {sel_army_no}.")
                                     time.sleep(1)
@@ -2319,10 +2329,10 @@ def main_app():
                                     st.error(f"Update failed: {e}")
                                     
                         st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary"):
+                        if st.button("🗑️ DELETE PATIENT COMPLETELY", type="secondary", key="rmo_del_pt"):
                             try:
-                                del_army = encrypt_data(sel_army_no)
-                                supabase.table("patient_registry").delete().eq("army_no", del_army).execute()
+                                # 4. USE TARGET HASH TO DELETE
+                                supabase.table("patient_registry").delete().eq("army_no", target_db_army_no).execute()
                                 st.success(f"Patient {sel_army_no} has been permanently deleted.")
                                 time.sleep(1)
                                 st.rerun()
@@ -2331,7 +2341,7 @@ def main_app():
                 else:
                     st.info("⚠️ BFNAs have View-Only access to the Patient Registry. Please contact the RMO to modify or delete patient dossiers.")
             else:
-                st.warning("Registry is empty.")
+                st.warning("Registry is currently empty.")
 
     # ------------------------------------------
     # 10. RMO DASHBOARD (ADMIN ONLY)
