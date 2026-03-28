@@ -65,13 +65,19 @@ def decrypt_data(data):
 # ==========================================
 # CLOUD DATA FETCHING & HELPERS
 # ==========================================
+@st.cache_data(ttl=60)
+def fetch_registry_cached():
+    """Memorizes the cloud registry for 60 seconds to prevent lag on keystrokes."""
+    res = supabase.table("patient_registry").select("*").execute()
+    return res.data
+
 def get_patient_record(army_no_query):
     if not army_no_query: return None
-    res = supabase.table("patient_registry").select("*").execute()
-    df = pd.DataFrame(res.data)
     
-    if df.empty: return None
+    cached_data = fetch_registry_cached()
+    if not cached_data: return None
     
+    df = pd.DataFrame(cached_data)
     df['army_no'] = df['army_no'].apply(decrypt_data)
     match = df[df['army_no'].str.upper() == army_no_query.strip().upper()]
     
@@ -198,7 +204,7 @@ def load_cnn():
     try: return tf.keras.models.load_model(f'{working_dir}/demo_ecg_model.h5')
     except Exception: return None
 
-model, scaler = load_models()
+
 
 # ==========================================
 # GLOBAL OPTIONS & VARIABLES
@@ -1076,6 +1082,7 @@ def main_app():
 
             features = [30, 0, 120, 80, 72, 16, 98, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14.0, 0] 
             ml_prediction = 1
+            model, scaler = load_models()
             if scaler and model:
                 try: ml_prediction = model.predict(scaler.transform([features]))[0]
                 except: pass
@@ -2476,6 +2483,9 @@ def main_app():
                         
                         try:
                             supabase.table("patient_registry").upsert(reg_data).execute()
+                            
+                            st.cache_data.clear() # <--- ADD THIS LINE TO INSTANTLY REFRESH MEMORY
+                            
                             st.success(f"✅ Patient {reg_army_no.upper()} successfully registered in Battalion Database.")
                             time.sleep(1)
                             st.rerun()
